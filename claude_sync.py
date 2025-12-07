@@ -24,6 +24,7 @@ import shutil
 import sys
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -163,6 +164,49 @@ def sanitize_sensitive_data(text: str) -> str:
     # Redact any very long alphanumeric strings (likely tokens)
     text = re.sub(r'\b[a-zA-Z0-9_-]{50,}\b', '[REDACTED-TOKEN]', text)
     return text
+
+
+def parse_timestamp(ts: str | None) -> datetime | None:
+    """Parse ISO timestamp, handling various formats.
+
+    Args:
+        ts: ISO timestamp string (may be None)
+
+    Returns:
+        Parsed datetime object, or None if parsing fails or ts is None
+    """
+    if not ts:
+        return None
+    try:
+        # Handle 'Z' suffix (Zulu time = UTC)
+        return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+    except (ValueError, AttributeError):
+        return None
+
+
+def timestamps_equal(ts1: str | None, ts2: str | None) -> bool:
+    """Compare timestamps for equality, handling format differences.
+
+    Handles cases like:
+    - 2024-01-15T10:30:00Z vs 2024-01-15T10:30:00+00:00 (same time, different format)
+    - None/empty values
+    - Unparseable timestamps (falls back to string comparison)
+
+    Args:
+        ts1: First timestamp string
+        ts2: Second timestamp string
+
+    Returns:
+        True if timestamps represent the same moment in time
+    """
+    dt1 = parse_timestamp(ts1)
+    dt2 = parse_timestamp(ts2)
+
+    if dt1 is None or dt2 is None:
+        # If either can't be parsed, fall back to string comparison
+        return ts1 == ts2
+
+    return dt1 == dt2
 
 
 # =============================================================================
@@ -717,6 +761,40 @@ def backup_file(file_path: Path, backup_dir: Path, max_backups: int = 5) -> Path
     return backup_path
 
 
+def atomic_write_json(path: Path, data: dict) -> None:
+    """Write JSON file atomically using temp file + rename.
+
+    Args:
+        path: Target file path
+        data: Data to write as JSON
+
+    Raises:
+        OSError: If write or rename fails
+    """
+    import tempfile
+
+    # Create temp file in same directory (ensures same filesystem for atomic rename)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f'.{path.name}.',
+        suffix='.tmp'
+    )
+    tmp = Path(tmp_path)
+
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())  # Ensure written to disk
+
+        # Atomic rename (POSIX guarantees atomicity)
+        tmp.replace(path)
+    except:
+        # Clean up temp file on error
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 # =============================================================================
 # Output Structure (Task 8co.7)
 # =============================================================================
@@ -726,6 +804,7 @@ def write_project_output(
     project: dict,
     docs: list[dict],
     output_dir: Path,
+    prev_state: dict | None = None,
 ) -> Path:
     """Write project data to output directory structure.
 
@@ -739,6 +818,7 @@ def write_project_output(
         project: Project metadata dict
         docs: List of document dicts
         output_dir: Base output directory
+        prev_state: Previous sync state for rename detection
 
     Returns:
         Path to created project directory
@@ -751,6 +831,21 @@ def write_project_output(
     # Create project directory
     project_slug = make_project_slug(project_name, project_uuid)
     project_dir = output_dir / project_slug
+
+    # Check for project rename - look for old directory with same UUID
+    if prev_state:
+        prev_project = prev_state.get("projects", {}).get(project_uuid)
+        if prev_project:
+            prev_name = prev_project.get("name", "")
+            if prev_name and prev_name != project_name:
+                # Project was renamed - find and remove old directory
+                prev_slug = make_project_slug(prev_name, project_uuid)
+                prev_dir = output_dir / prev_slug
+                if prev_dir.exists() and prev_dir != project_dir:
+                    log.info(f"Project renamed: '{prev_name}' -> '{project_name}'")
+                    log.debug(f"Removing old directory: {prev_slug}")
+                    shutil.rmtree(prev_dir)
+
     project_dir.mkdir(parents=True, exist_ok=True)
 
     # Check for UUID collision - another project might own this directory
@@ -821,8 +916,16 @@ _No project instructions defined._
         docs_dir = project_dir / "docs"
         docs_dir.mkdir(exist_ok=True)
 
+        # Get previous doc state for rename detection
+        prev_docs = {}
+        if prev_state:
+            prev_project = prev_state.get("projects", {}).get(project_uuid, {})
+            prev_docs = prev_project.get("docs", {})
+
         used_filenames: set[str] = set()
         for doc in docs:
+            doc_uuid = doc.get("uuid", "")
+
             # API uses 'file_name' key
             doc_filename = doc.get("file_name") or doc.get("filename") or "untitled.md"
             # Ensure .md extension
@@ -833,6 +936,19 @@ _No project instructions defined._
             safe_filename = sanitize_filename(doc_filename)
             unique_filename = get_unique_filename(safe_filename, used_filenames)
             used_filenames.add(unique_filename)
+
+            # Check for doc rename - if UUID exists but filename changed, delete old file
+            if doc_uuid and doc_uuid in prev_docs:
+                prev_filename = prev_docs[doc_uuid].get("filename", "")
+                if prev_filename and prev_filename != doc_filename:
+                    # Doc was renamed - delete old file
+                    prev_safe = sanitize_filename(prev_filename)
+                    if not prev_safe.lower().endswith(".md"):
+                        prev_safe = f"{prev_safe}.md"
+                    old_doc_path = docs_dir / prev_safe
+                    if old_doc_path.exists():
+                        log.debug(f"Doc renamed: '{prev_filename}' -> '{doc_filename}', removing old file")
+                        old_doc_path.unlink()
 
             # Write doc content
             doc_content = doc.get("content", "")
@@ -895,7 +1011,7 @@ def write_index(
             }
 
     index_path = output_dir / "index.json"
-    index_path.write_text(json.dumps(index, indent=2), encoding="utf-8")
+    atomic_write_json(index_path, index)
     log.info(f"Wrote {index_path}")
 
 
@@ -957,8 +1073,7 @@ def load_sync_state(output_dir: Path) -> dict:
 def save_sync_state(output_dir: Path, state: dict) -> None:
     """Save sync state to output directory."""
     state_path = output_dir / SYNC_STATE_FILE
-    with open(state_path, "w") as f:
-        json.dump(state, f, indent=2)
+    atomic_write_json(state_path, state)
     log.debug(f"Saved sync state to {state_path}")
 
 
@@ -985,7 +1100,7 @@ def project_needs_sync(
     current_updated = project.get("updated_at", "")
     prev_updated = prev_project.get("updated_at", "")
 
-    if current_updated != prev_updated:
+    if not timestamps_equal(current_updated, prev_updated):
         return True, f"updated ({prev_updated[:10]} → {current_updated[:10]})"
 
     # Check prompt_template (instructions) changed
@@ -1083,7 +1198,7 @@ def conversation_needs_sync(
     current_updated = convo_meta.get("updated_at", "")
     prev_updated = prev_convo.get("updated_at", "")
 
-    if current_updated != prev_updated:
+    if not timestamps_equal(current_updated, prev_updated):
         return True, "updated"
 
     return False, "unchanged"
@@ -1114,6 +1229,7 @@ def write_conversation_output(
     conversation: dict,
     project_dir: Path,
     used_filenames: set[str],
+    prev_convos: dict | None = None,
 ) -> str | None:
     """Write conversation to project's conversations directory.
 
@@ -1124,6 +1240,7 @@ def write_conversation_output(
         conversation: Full conversation dict with chat_messages
         project_dir: Project directory path
         used_filenames: Set of already-used filenames (updated in place)
+        prev_convos: Previous conversation state for rename detection
 
     Returns:
         Filename used, or None if no messages
@@ -1150,6 +1267,16 @@ def write_conversation_output(
 
     filename = get_unique_filename(base_filename, used_filenames)
     used_filenames.add(filename)
+
+    # Check for conversation rename - if UUID exists but filename changed, delete old file
+    if prev_convos and convo_uuid in prev_convos:
+        prev_filename = prev_convos[convo_uuid].get("filename", "")
+        if prev_filename and prev_filename != filename:
+            # Conversation was renamed - delete old file
+            old_convo_path = convos_dir / prev_filename
+            if old_convo_path.exists():
+                log.debug(f"Conversation renamed: '{prev_filename}' -> '{filename}', removing old file")
+                old_convo_path.unlink()
 
     # Build markdown content
     lines = [
@@ -1446,68 +1573,85 @@ def sync(config: Config) -> int:
             # Check if sync needed (incremental)
             needs_sync, reason = project_needs_sync(full_project, docs, prev_state)
 
+            # Compute project directory deterministically (needed for conversations)
+            project_slug = make_project_slug(project_name, project_uuid)
+            project_dir = config.output_dir / project_slug
+
+            # Track if we actually synced anything for this project
+            project_synced = False
+
+            # Sync project metadata and docs if needed
             if needs_sync or config.full_sync:
                 log.debug(f"Syncing {project_name}: {reason}")
-                project_dir = write_project_output(full_project, docs, config.output_dir)
+                project_dir = write_project_output(full_project, docs, config.output_dir, prev_state)
+                project_synced = True
 
-                # Sync conversations (default on, skip with --skip-conversations)
-                if not config.skip_conversations:
-                    convo_list = fetch_project_conversations(session, org_uuid, project_uuid)
-                    if convo_list:
-                        # Get previous conversation state for incremental sync
-                        prev_project_state = prev_state.get("projects", {}).get(project_uuid, {})
-                        prev_convos = prev_project_state.get("conversations", {})
+            # Sync conversations independently (always check unless --skip-conversations)
+            # Conversations don't update project.updated_at, so we need to check them separately
+            if not config.skip_conversations:
+                convo_list = fetch_project_conversations(session, org_uuid, project_uuid)
+                if convo_list:
+                    # Get previous conversation state for incremental sync
+                    prev_project_state = prev_state.get("projects", {}).get(project_uuid, {})
+                    prev_convos = prev_project_state.get("conversations", {})
 
-                        convos_synced = 0
-                        convos_skipped = 0
-                        used_convo_filenames: set[str] = set()
-                        convo_index: dict[str, dict] = {}
+                    convos_synced = 0
+                    convos_skipped = 0
+                    used_convo_filenames: set[str] = set()
+                    convo_index: dict[str, dict] = {}
 
-                        for convo_meta in convo_list:
-                            convo_uuid = convo_meta.get("uuid")
-                            if not convo_uuid:
-                                continue
+                    for convo_meta in convo_list:
+                        convo_uuid = convo_meta.get("uuid")
+                        if not convo_uuid:
+                            continue
 
-                            # Check if conversation needs sync (incremental)
-                            convo_needs_sync, convo_reason = conversation_needs_sync(
-                                convo_meta, prev_convos, config.full_sync
-                            )
+                        # Check if conversation needs sync (incremental)
+                        convo_needs_sync, convo_reason = conversation_needs_sync(
+                            convo_meta, prev_convos, config.full_sync
+                        )
 
-                            if convo_needs_sync:
-                                try:
-                                    full_convo = fetch_conversation(session, org_uuid, convo_uuid)
-                                    filename = write_conversation_output(
-                                        full_convo, project_dir, used_convo_filenames
-                                    )
-                                    if filename:
-                                        convo_index[convo_uuid] = {
-                                            "name": convo_meta.get("name", "Untitled"),
-                                            "filename": filename,
-                                            "created_at": convo_meta.get("created_at"),
-                                            "updated_at": convo_meta.get("updated_at"),
-                                            "message_count": len(full_convo.get("chat_messages", [])),
-                                        }
-                                        convos_synced += 1
-                                except (APIError, FileNotFoundError) as e:
-                                    log.warning(f"Failed to fetch conversation {convo_uuid}: {e}")
-                            else:
-                                # Keep previous index entry for unchanged conversations
-                                if convo_uuid in prev_convos:
-                                    convo_index[convo_uuid] = prev_convos[convo_uuid]
-                                convos_skipped += 1
+                        if convo_needs_sync:
+                            try:
+                                # Ensure project directory exists before writing conversations
+                                project_dir.mkdir(parents=True, exist_ok=True)
 
-                        # Write conversation index
-                        if convo_index:
-                            write_conversation_index(project_dir, convo_index, synced_at)
+                                full_convo = fetch_conversation(session, org_uuid, convo_uuid)
+                                filename = write_conversation_output(
+                                    full_convo, project_dir, used_convo_filenames, prev_convos
+                                )
+                                if filename:
+                                    convo_index[convo_uuid] = {
+                                        "name": convo_meta.get("name", "Untitled"),
+                                        "filename": filename,
+                                        "created_at": convo_meta.get("created_at"),
+                                        "updated_at": convo_meta.get("updated_at"),
+                                        "message_count": len(full_convo.get("chat_messages", [])),
+                                    }
+                                    convos_synced += 1
+                                    project_synced = True  # Mark that we synced something
+                            except (APIError, FileNotFoundError) as e:
+                                log.warning(f"Failed to fetch conversation {convo_uuid}: {e}")
+                        else:
+                            # Keep previous index entry for unchanged conversations
+                            if convo_uuid in prev_convos:
+                                convo_index[convo_uuid] = prev_convos[convo_uuid]
+                            convos_skipped += 1
 
-                        if convos_skipped > 0:
-                            log.debug(f"Conversations: {convos_synced} synced, {convos_skipped} skipped")
-                        elif convos_synced > 0:
-                            log.debug(f"Conversations: {convos_synced} synced")
+                    # Write conversation index
+                    if convo_index:
+                        project_dir.mkdir(parents=True, exist_ok=True)
+                        write_conversation_index(project_dir, convo_index, synced_at)
 
-                        # Store conversation state for next sync
-                        full_project["_conversations"] = convo_index
+                    if convos_skipped > 0:
+                        log.debug(f"Conversations: {convos_synced} synced, {convos_skipped} skipped")
+                    elif convos_synced > 0:
+                        log.debug(f"Conversations: {convos_synced} synced")
 
+                    # Store conversation state for next sync
+                    full_project["_conversations"] = convo_index
+
+            # Update counters
+            if project_synced:
                 synced_count += 1
             else:
                 log.debug(f"Skipping {project_name}: {reason}")
