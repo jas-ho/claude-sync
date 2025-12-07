@@ -1000,8 +1000,28 @@ def write_conversation_output(
 
     for msg in messages:
         sender = msg.get("sender", "unknown")
-        content = msg.get("text", "")
         msg_created = msg.get("created_at", "")
+
+        # Extract message content from content array (API returns content as array of blocks)
+        # Each block has 'type' ('text', 'thinking', etc.) and the content in a matching key
+        content_parts = []
+        content_blocks = msg.get("content", [])
+        if isinstance(content_blocks, list):
+            for block in content_blocks:
+                if isinstance(block, dict):
+                    block_type = block.get("type", "")
+                    if block_type == "text":
+                        content_parts.append(block.get("text", ""))
+                    elif block_type == "thinking":
+                        # Include thinking blocks in collapsed format
+                        thinking_text = block.get("thinking", "")
+                        if thinking_text:
+                            content_parts.append(f"<details>\n<summary>Thinking...</summary>\n\n{thinking_text}\n</details>")
+        content = "\n\n".join(filter(None, content_parts))
+
+        # Fallback to legacy 'text' field if content array is empty
+        if not content:
+            content = msg.get("text", "")
 
         # Format sender nicely
         if sender == "human":
