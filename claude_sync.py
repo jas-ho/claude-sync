@@ -52,6 +52,8 @@ class Config:
     include_conversations: bool = False
     verbose: bool = False
     list_orgs: bool = False
+    full_sync: bool = False  # Force full sync, ignore cached state
+    auto_commit: bool = True  # Auto git-init and commit after sync
 
 
 def get_config_from_env() -> dict:
@@ -709,6 +711,291 @@ def write_index(
 
 
 # =============================================================================
+# Sync State Management (Incremental Sync)
+# =============================================================================
+
+SYNC_STATE_FILE = ".sync-state.json"
+
+
+def compute_doc_hash(content: str) -> str:
+    """Compute hash of document content for change detection."""
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+
+
+def load_sync_state(output_dir: Path) -> dict:
+    """Load previous sync state from output directory.
+
+    Returns:
+        Dict with structure:
+        {
+            "synced_at": "ISO timestamp",
+            "projects": {
+                "<uuid>": {
+                    "updated_at": "API timestamp",
+                    "docs": {
+                        "<doc_uuid>": {"hash": "...", "filename": "..."}
+                    }
+                }
+            }
+        }
+    """
+    state_path = output_dir / SYNC_STATE_FILE
+    if not state_path.exists():
+        return {"projects": {}}
+
+    try:
+        with open(state_path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        log.warning(f"Could not load sync state: {e}")
+        return {"projects": {}}
+
+
+def save_sync_state(output_dir: Path, state: dict) -> None:
+    """Save sync state to output directory."""
+    state_path = output_dir / SYNC_STATE_FILE
+    with open(state_path, "w") as f:
+        json.dump(state, f, indent=2)
+    log.debug(f"Saved sync state to {state_path}")
+
+
+def project_needs_sync(
+    project: dict, docs: list[dict], prev_state: dict
+) -> tuple[bool, str]:
+    """Check if project needs to be synced.
+
+    Args:
+        project: Current project metadata from API
+        docs: Current docs from API
+        prev_state: Previous sync state
+
+    Returns:
+        Tuple of (needs_sync: bool, reason: str)
+    """
+    project_uuid = project["uuid"]
+    prev_project = prev_state.get("projects", {}).get(project_uuid)
+
+    if not prev_project:
+        return True, "new project"
+
+    # Check project updated_at timestamp
+    current_updated = project.get("updated_at", "")
+    prev_updated = prev_project.get("updated_at", "")
+
+    if current_updated != prev_updated:
+        return True, f"updated ({prev_updated[:10]} → {current_updated[:10]})"
+
+    # Check doc count changed
+    prev_doc_count = len(prev_project.get("docs", {}))
+    if len(docs) != prev_doc_count:
+        return True, f"doc count changed ({prev_doc_count} → {len(docs)})"
+
+    # Check doc content hashes
+    prev_docs = prev_project.get("docs", {})
+    for doc in docs:
+        doc_uuid = doc.get("uuid", "")
+        content = doc.get("content", "")
+        current_hash = compute_doc_hash(content)
+
+        prev_doc = prev_docs.get(doc_uuid, {})
+        if prev_doc.get("hash") != current_hash:
+            return True, f"doc content changed"
+
+    return False, "unchanged"
+
+
+def build_project_state(project: dict, docs: list[dict]) -> dict:
+    """Build sync state entry for a project."""
+    doc_states = {}
+    for doc in docs:
+        doc_uuid = doc.get("uuid", "")
+        if doc_uuid:
+            doc_states[doc_uuid] = {
+                "hash": compute_doc_hash(doc.get("content", "")),
+                "filename": doc.get("file_name") or doc.get("filename", ""),
+            }
+
+    return {
+        "updated_at": project.get("updated_at", ""),
+        "prompt_template_hash": compute_doc_hash(project.get("prompt_template", "")),
+        "docs": doc_states,
+    }
+
+
+# =============================================================================
+# Conversation Output (Task 8co.11)
+# =============================================================================
+
+
+def write_conversation_output(
+    conversation: dict,
+    project_dir: Path,
+    used_filenames: set[str],
+) -> str | None:
+    """Write conversation to project's conversations directory.
+
+    Creates:
+        <project_dir>/conversations/<name>.md
+
+    Args:
+        conversation: Full conversation dict with chat_messages
+        project_dir: Project directory path
+        used_filenames: Set of already-used filenames (updated in place)
+
+    Returns:
+        Filename used, or None if no messages
+    """
+    from datetime import datetime, timezone
+
+    messages = conversation.get("chat_messages", [])
+    if not messages:
+        return None
+
+    convo_name = conversation.get("name", "Untitled")
+    convo_uuid = conversation.get("uuid", "unknown")
+    created_at = conversation.get("created_at", "")
+    updated_at = conversation.get("updated_at", "")
+
+    # Create conversations directory
+    convos_dir = project_dir / "conversations"
+    convos_dir.mkdir(exist_ok=True)
+
+    # Generate filename from conversation name
+    base_filename = sanitize_filename(convo_name)
+    if not base_filename.lower().endswith(".md"):
+        base_filename = f"{base_filename}.md"
+
+    filename = get_unique_filename(base_filename, used_filenames)
+    used_filenames.add(filename)
+
+    # Build markdown content
+    lines = [
+        "---",
+        f"conversation_id: {convo_uuid}",
+        f"name: {convo_name}",
+        f"created_at: {created_at}",
+        f"updated_at: {updated_at}",
+        f"message_count: {len(messages)}",
+        f"synced_at: {datetime.now(timezone.utc).isoformat()}",
+        "---",
+        "",
+        f"# {convo_name}",
+        "",
+    ]
+
+    for msg in messages:
+        sender = msg.get("sender", "unknown")
+        content = msg.get("text", "")
+        msg_created = msg.get("created_at", "")
+
+        # Format sender nicely
+        if sender == "human":
+            sender_label = "**Human**"
+        elif sender == "assistant":
+            sender_label = "**Claude**"
+        else:
+            sender_label = f"**{sender}**"
+
+        # Add timestamp if available
+        if msg_created:
+            try:
+                # Parse and format timestamp
+                dt = datetime.fromisoformat(msg_created.replace("Z", "+00:00"))
+                timestamp = dt.strftime("%Y-%m-%d %H:%M")
+                sender_label = f"{sender_label} ({timestamp})"
+            except (ValueError, AttributeError):
+                pass
+
+        lines.append(f"## {sender_label}")
+        lines.append("")
+        lines.append(content)
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    # Write file
+    convo_path = convos_dir / filename
+    convo_path.write_text("\n".join(lines), encoding="utf-8")
+    log.debug(f"Wrote conversation: {convo_path}")
+
+    return filename
+
+
+# =============================================================================
+# Git Auto-Commit (Task 3ha)
+# =============================================================================
+
+
+def git_auto_commit(output_dir: Path, message: str | None = None) -> bool:
+    """Initialize git repo if needed and commit all changes.
+
+    Args:
+        output_dir: Output directory to commit
+        message: Commit message (default: "Sync <timestamp>")
+
+    Returns:
+        True if committed, False if nothing to commit or error
+    """
+    import subprocess
+    from datetime import datetime, timezone
+
+    git_dir = output_dir / ".git"
+
+    try:
+        # Initialize if not already a repo
+        if not git_dir.exists():
+            log.info("Initializing git repository...")
+            subprocess.run(
+                ["git", "init"],
+                cwd=output_dir,
+                capture_output=True,
+                check=True,
+            )
+
+        # Check if there are changes
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=output_dir,
+            capture_output=True,
+            text=True,
+        )
+
+        if not status_result.stdout.strip():
+            log.info("No changes to commit")
+            return False
+
+        # Stage all changes
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=output_dir,
+            capture_output=True,
+            check=True,
+        )
+
+        # Commit
+        if not message:
+            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            message = f"Sync {timestamp}"
+
+        subprocess.run(
+            ["git", "commit", "-m", message],
+            cwd=output_dir,
+            capture_output=True,
+            check=True,
+        )
+
+        log.info(f"Committed changes: {message}")
+        return True
+
+    except subprocess.CalledProcessError as e:
+        log.warning(f"Git operation failed: {e.stderr.decode() if e.stderr else e}")
+        return False
+    except FileNotFoundError:
+        log.warning("Git not found in PATH, skipping auto-commit")
+        return False
+
+
+# =============================================================================
 # Main Entry Point
 # =============================================================================
 
@@ -733,6 +1020,10 @@ def sync(config: Config) -> int:
     log.info(f"Syncing organization {org_uuid}")
     log.info(f"Output directory: {config.output_dir}")
     log.info(f"Browser: {config.browser}")
+    if config.include_conversations:
+        log.info("Including conversations")
+    if config.full_sync:
+        log.info("Full sync mode (ignoring cached state)")
 
     synced_at = datetime.now(timezone.utc).isoformat()
 
@@ -749,28 +1040,73 @@ def sync(config: Config) -> int:
         projects = fetch_projects(session, org_uuid)
         log.info(f"Found {len(projects)} projects")
 
-        # Step 4: Fetch docs and write output for each project
+        # Step 4: Load previous sync state (for incremental sync)
         config.output_dir.mkdir(parents=True, exist_ok=True)
+        prev_state = {} if config.full_sync else load_sync_state(config.output_dir)
+        new_state = {"synced_at": synced_at, "projects": {}}
 
+        # Step 5: Process each project
         synced_projects = []
+        synced_count = 0
+        skipped_count = 0
+
         for project in tqdm(projects, desc="Syncing projects", unit="project"):
+            project_uuid = project["uuid"]
             project_name = project.get("name", "Unknown")
             log.debug(f"Processing: {project_name}")
 
             # Fetch full project details (includes prompt_template)
-            full_project = fetch_project_details(session, org_uuid, project["uuid"])
+            full_project = fetch_project_details(session, org_uuid, project_uuid)
 
             # Fetch docs
-            docs = fetch_project_docs(session, org_uuid, project["uuid"])
-            full_project["_docs_count"] = len(docs)  # Track for index
+            docs = fetch_project_docs(session, org_uuid, project_uuid)
+            full_project["_docs_count"] = len(docs)
 
-            write_project_output(full_project, docs, config.output_dir)
+            # Check if sync needed (incremental)
+            needs_sync, reason = project_needs_sync(full_project, docs, prev_state)
+
+            if needs_sync or config.full_sync:
+                log.debug(f"Syncing {project_name}: {reason}")
+                project_dir = write_project_output(full_project, docs, config.output_dir)
+
+                # Sync conversations if requested
+                if config.include_conversations:
+                    convo_list = fetch_project_conversations(session, org_uuid, project_uuid)
+                    if convo_list:
+                        log.debug(f"Fetching {len(convo_list)} conversations...")
+                        used_convo_filenames: set[str] = set()
+                        for convo_meta in convo_list:
+                            convo_uuid = convo_meta.get("uuid")
+                            if convo_uuid:
+                                try:
+                                    full_convo = fetch_conversation(session, org_uuid, convo_uuid)
+                                    write_conversation_output(full_convo, project_dir, used_convo_filenames)
+                                except (APIError, FileNotFoundError) as e:
+                                    log.warning(f"Failed to fetch conversation {convo_uuid}: {e}")
+
+                synced_count += 1
+            else:
+                log.debug(f"Skipping {project_name}: {reason}")
+                skipped_count += 1
+
+            # Build state for this project (always update state)
+            new_state["projects"][project_uuid] = build_project_state(full_project, docs)
             synced_projects.append(full_project)
 
-        # Step 5: Write index
+        # Step 6: Write index and save sync state
         write_index(synced_projects, config.output_dir, org_uuid, synced_at)
+        save_sync_state(config.output_dir, new_state)
 
-        log.info(f"Sync complete! {len(projects)} projects synced to {config.output_dir}")
+        # Step 7: Git auto-commit
+        if config.auto_commit:
+            git_auto_commit(config.output_dir)
+
+        # Summary
+        if skipped_count > 0:
+            log.info(f"Sync complete! {synced_count} updated, {skipped_count} unchanged")
+        else:
+            log.info(f"Sync complete! {len(projects)} projects synced to {config.output_dir}")
+
         return 0
 
     except CookieExtractionError as e:
@@ -865,6 +1201,18 @@ Environment:
     )
 
     parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Force full sync, ignore cached state",
+    )
+
+    parser.add_argument(
+        "--no-git",
+        action="store_true",
+        help="Disable automatic git init and commit",
+    )
+
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -882,6 +1230,8 @@ Environment:
         include_conversations=args.conversations,
         verbose=args.verbose,
         list_orgs=args.list_orgs,
+        full_sync=args.full,
+        auto_commit=not args.no_git,
     )
 
 
