@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["curl_cffi", "tqdm", "browser-cookie3"]
+# dependencies = ["curl_cffi", "tqdm", "browser-cookie3", "typer", "rich"]
 # ///
 """
 claude-sync: Sync Claude web app projects to local storage.
@@ -12,7 +12,6 @@ and organizes them into a local directory structure for Claude Code integration.
 
 from __future__ import annotations
 
-import argparse
 import fcntl
 import hashlib
 import http.cookiejar
@@ -26,8 +25,11 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated, Optional
+
+import typer
 
 if TYPE_CHECKING:
     from curl_cffi import requests
@@ -37,6 +39,12 @@ if TYPE_CHECKING:
 DEFAULT_OUTPUT_DIR = Path.home() / ".local" / "share" / "claude-sync"
 API_BASE = "https://claude.ai/api/organizations"
 SUPPORTED_BROWSERS = ["edge", "chrome"]
+
+
+class Browser(str, Enum):
+    """Supported browsers for cookie extraction."""
+    edge = "edge"
+    chrome = "chrome"
 
 # Size limits to prevent memory exhaustion
 MAX_DOC_SIZE_MB = 10  # Skip docs larger than 10MB
@@ -140,6 +148,7 @@ class Config:
     auto_commit: bool = True  # Auto git-init and commit after sync
     project_filter: str | None = None  # Filter to single project (UUID or name substring)
     min_disk_mb: int = 100  # Minimum required disk space in MB
+    include_standalone: bool = False  # Include standalone conversations (not in projects)
 
 
 def get_config_from_env() -> dict:
@@ -627,6 +636,51 @@ def fetch_conversation(
     return convo
 
 
+def fetch_all_conversations(session: "requests.Session", org_uuid: str) -> list[dict]:
+    """Fetch all conversations for an organization (both project and standalone).
+
+    Args:
+        session: Authenticated requests session
+        org_uuid: Organization UUID
+
+    Returns:
+        List of conversation metadata dicts
+    """
+    url = f"{API_BASE}/{org_uuid}/chat_conversations"
+    convos = _api_request(session, url)
+
+    if not isinstance(convos, list):
+        raise APIError(f"Unexpected response format: expected list, got {type(convos)}")
+
+    log.debug(f"Fetched {len(convos)} total conversations")
+    return convos
+
+
+def fetch_standalone_conversations(
+    session: "requests.Session", org_uuid: str, project_uuids: set[str]
+) -> list[dict]:
+    """Fetch conversations not associated with any project.
+
+    Args:
+        session: Authenticated requests session
+        org_uuid: Organization UUID
+        project_uuids: Set of project UUIDs to exclude
+
+    Returns:
+        List of standalone conversation metadata dicts
+    """
+    all_convos = fetch_all_conversations(session, org_uuid)
+
+    # Filter out conversations that belong to projects
+    standalone = [
+        c for c in all_convos
+        if not c.get("project_uuid") or c.get("project_uuid") not in project_uuids
+    ]
+
+    log.debug(f"Found {len(standalone)} standalone conversations")
+    return standalone
+
+
 # =============================================================================
 # Filename Sanitization (Task 8co.6)
 # =============================================================================
@@ -1014,6 +1068,7 @@ def write_index(
     org_uuid: str,
     synced_at: str,
     orphaned_projects: list[dict] | None = None,
+    standalone_count: int = 0,
 ) -> None:
     """Write index.json manifest file.
 
@@ -1023,6 +1078,7 @@ def write_index(
         org_uuid: Organization UUID
         synced_at: ISO timestamp of sync
         orphaned_projects: List of projects deleted remotely but kept locally
+        standalone_count: Number of standalone conversations synced
     """
     index = {
         "synced_at": synced_at,
@@ -1057,6 +1113,13 @@ def write_index(
                 "orphaned": True,
                 "orphaned_at": orphan.get("_orphaned_at"),
             }
+
+    # Add standalone conversations section if any
+    if standalone_count > 0:
+        index["standalone_conversations"] = {
+            "count": standalone_count,
+            "path": "_standalone/",
+        }
 
     index_path = output_dir / "index.json"
     atomic_write_json(index_path, index)
@@ -1269,62 +1332,26 @@ def write_conversation_index(project_dir: Path, convo_index: dict, synced_at: st
     }
 
     index_path = convos_dir / "index.json"
-    index_path.write_text(json.dumps(index, indent=2), encoding="utf-8")
+    atomic_write_json(index_path, index)
     log.debug(f"Wrote {index_path}")
 
 
-def write_conversation_output(
-    conversation: dict,
-    project_dir: Path,
-    used_filenames: set[str],
-    prev_convos: dict | None = None,
-) -> str | None:
-    """Write conversation to project's conversations directory.
-
-    Creates:
-        <project_dir>/conversations/<name>.md
+def format_conversation_markdown(conversation: dict) -> str:
+    """Format conversation as markdown content.
 
     Args:
         conversation: Full conversation dict with chat_messages
-        project_dir: Project directory path
-        used_filenames: Set of already-used filenames (updated in place)
-        prev_convos: Previous conversation state for rename detection
 
     Returns:
-        Filename used, or None if no messages
+        Formatted markdown string
     """
     from datetime import datetime, timezone
 
     messages = conversation.get("chat_messages", [])
-    if not messages:
-        return None
-
     convo_name = conversation.get("name", "Untitled")
     convo_uuid = conversation.get("uuid", "unknown")
     created_at = conversation.get("created_at", "")
     updated_at = conversation.get("updated_at", "")
-
-    # Create conversations directory
-    convos_dir = project_dir / "conversations"
-    convos_dir.mkdir(exist_ok=True)
-
-    # Generate filename from conversation name
-    base_filename = sanitize_filename(convo_name)
-    if not base_filename.lower().endswith(".md"):
-        base_filename = f"{base_filename}.md"
-
-    filename = get_unique_filename(base_filename, used_filenames)
-    used_filenames.add(filename)
-
-    # Check for conversation rename - if UUID exists but filename changed, delete old file
-    if prev_convos and convo_uuid in prev_convos:
-        prev_filename = prev_convos[convo_uuid].get("filename", "")
-        if prev_filename and prev_filename != filename:
-            # Conversation was renamed - delete old file
-            old_convo_path = convos_dir / prev_filename
-            if old_convo_path.exists():
-                log.info(f"Conversation renamed: '{prev_filename}' -> '{filename}', removing old file")
-                old_convo_path.unlink()
 
     # Build markdown content
     lines = [
@@ -1391,10 +1418,121 @@ def write_conversation_output(
         lines.append("---")
         lines.append("")
 
-    # Write file
+    return "\n".join(lines)
+
+
+def write_conversation_output(
+    conversation: dict,
+    project_dir: Path,
+    used_filenames: set[str],
+    prev_convos: dict | None = None,
+) -> str | None:
+    """Write conversation to project's conversations directory.
+
+    Creates:
+        <project_dir>/conversations/<name>.md
+
+    Args:
+        conversation: Full conversation dict with chat_messages
+        project_dir: Project directory path
+        used_filenames: Set of already-used filenames (updated in place)
+        prev_convos: Previous conversation state for rename detection
+
+    Returns:
+        Filename used, or None if no messages
+    """
+    messages = conversation.get("chat_messages", [])
+    if not messages:
+        return None
+
+    convo_name = conversation.get("name", "Untitled")
+    convo_uuid = conversation.get("uuid", "unknown")
+
+    # Create conversations directory
+    convos_dir = project_dir / "conversations"
+    convos_dir.mkdir(exist_ok=True)
+
+    # Generate filename from conversation name
+    base_filename = sanitize_filename(convo_name)
+    if not base_filename.lower().endswith(".md"):
+        base_filename = f"{base_filename}.md"
+
+    filename = get_unique_filename(base_filename, used_filenames)
+    used_filenames.add(filename)
+
+    # Check for conversation rename - if UUID exists but filename changed, delete old file
+    if prev_convos and convo_uuid in prev_convos:
+        prev_filename = prev_convos[convo_uuid].get("filename", "")
+        if prev_filename and prev_filename != filename:
+            # Conversation was renamed - delete old file
+            old_convo_path = convos_dir / prev_filename
+            if old_convo_path.exists():
+                log.info(f"Conversation renamed: '{prev_filename}' -> '{filename}', removing old file")
+                old_convo_path.unlink()
+
+    # Format and write file
+    markdown = format_conversation_markdown(conversation)
     convo_path = convos_dir / filename
-    convo_path.write_text("\n".join(lines), encoding="utf-8")
+    convo_path.write_text(markdown, encoding="utf-8")
     log.debug(f"Wrote conversation: {convo_path}")
+
+    return filename
+
+
+def write_standalone_conversation(
+    conversation: dict,
+    output_dir: Path,
+    used_filenames: set[str],
+    prev_convos: dict | None = None,
+) -> str | None:
+    """Write standalone conversation to _standalone directory.
+
+    Creates:
+        <output_dir>/_standalone/<name>-<uuid[:8]>.md
+
+    Args:
+        conversation: Full conversation dict with chat_messages
+        output_dir: Base output directory
+        used_filenames: Set of already-used filenames (updated in place)
+        prev_convos: Previous conversation state for rename detection
+
+    Returns:
+        Filename used, or None if no messages
+    """
+    messages = conversation.get("chat_messages", [])
+    if not messages:
+        return None
+
+    convo_name = conversation.get("name", "Untitled")
+    convo_uuid = conversation.get("uuid", "unknown")
+
+    # Create standalone directory
+    standalone_dir = output_dir / "_standalone"
+    standalone_dir.mkdir(exist_ok=True)
+
+    # Generate filename: name-uuid[:8].md for uniqueness
+    short_uuid = convo_uuid.replace("-", "")[:8]
+    base_name = sanitize_filename(convo_name)
+    base_filename = f"{base_name}-{short_uuid}.md"
+
+    filename = get_unique_filename(base_filename, used_filenames)
+    used_filenames.add(filename)
+
+    # Check for conversation rename - if UUID exists but filename changed, delete old file
+    if prev_convos and convo_uuid in prev_convos:
+        prev_filename = prev_convos[convo_uuid].get("filename", "")
+        if prev_filename and prev_filename != filename:
+            # Conversation was renamed - delete old file
+            old_convo_path = standalone_dir / prev_filename
+            if old_convo_path.exists():
+                log.info(f"Standalone conversation renamed: '{prev_filename}' -> '{filename}'")
+                old_convo_path.unlink()
+
+    # Format and write file
+    markdown = format_conversation_markdown(conversation)
+    convo_path = standalone_dir / filename
+    convo_path.write_text(markdown, encoding="utf-8")
+    log.debug(f"Wrote standalone conversation: {convo_path}")
 
     return filename
 
@@ -1568,6 +1706,8 @@ def sync(config: Config) -> int:
         'conversations_synced': 0,
         'conversations_skipped': 0,
         'orphaned_projects': 0,
+        'standalone_synced': 0,
+        'standalone_skipped': 0,
     }
 
     try:
@@ -1832,126 +1972,13 @@ def sync(config: Config) -> int:
             release_lock(lock_fd)
 
 
-def parse_args(argv: list[str] | None = None) -> Config:
-    """Parse command line arguments.
-
-    Args:
-        argv: Command line arguments (defaults to sys.argv[1:])
-
-    Returns:
-        Config object with parsed settings
-    """
-    # Load defaults from environment
-    env_config = get_config_from_env()
-
-    parser = argparse.ArgumentParser(
-        description="Sync Claude web app projects to local storage for Claude Code.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s                                    # Auto-discover org (if only one)
-  %(prog)s --list-orgs                        # List available organizations
-  %(prog)s f3e5048f-1380-4436-83cf-085832fff594
-  %(prog)s f3e5048f-1380-4436-83cf-085832fff594 -o ./my-projects
-
-Finding your org UUID:
-  Run with --list-orgs to see available organizations, or:
-  1. Open claude.ai, log in
-  2. DevTools (F12) > Network tab
-  3. Filter for 'organizations' in any request URL
-
-Environment:
-  CLAUDE_ORG_UUID    Default organization UUID
-  .claude-sync.env   Local config file (checked in cwd and ~/)
-        """,
-    )
-
-    parser.add_argument(
-        "org_uuid",
-        nargs="?",
-        default=env_config.get("CLAUDE_ORG_UUID"),
-        help="Organization UUID (optional if only one org, or set CLAUDE_ORG_UUID)",
-    )
-
-    parser.add_argument(
-        "--list-orgs",
-        action="store_true",
-        help="List available organizations and exit",
-    )
-
-    parser.add_argument(
-        "-o",
-        "--output",
-        type=Path,
-        default=DEFAULT_OUTPUT_DIR,
-        help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})",
-    )
-
-    parser.add_argument(
-        "-b",
-        "--browser",
-        choices=SUPPORTED_BROWSERS,
-        default="edge",
-        help="Browser to extract cookies from (default: edge)",
-    )
-
-    parser.add_argument(
-        "--skip-conversations",
-        action="store_true",
-        help="Skip syncing project conversations (faster sync)",
-    )
-
-    parser.add_argument(
-        "-p",
-        "--project",
-        type=str,
-        default=None,
-        help="Sync only this project (UUID or name substring match)",
-    )
-
-    parser.add_argument(
-        "--full",
-        action="store_true",
-        help="Force full sync, ignore cached state",
-    )
-
-    parser.add_argument(
-        "--no-git",
-        action="store_true",
-        help="Disable automatic git init and commit",
-    )
-
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Enable verbose output",
-    )
-
-    parser.add_argument(
-        "--min-disk-mb",
-        type=int,
-        default=100,
-        metavar="MB",
-        help="Minimum free disk space in MB (default: 100)",
-    )
-
-    args = parser.parse_args(argv)
-
-    # org_uuid validation happens in main() after checking list_orgs
-
-    return Config(
-        org_uuid=args.org_uuid,
-        output_dir=args.output,
-        browser=args.browser,
-        skip_conversations=args.skip_conversations,
-        verbose=args.verbose,
-        list_orgs=args.list_orgs,
-        full_sync=args.full,
-        auto_commit=not args.no_git,
-        project_filter=args.project,
-        min_disk_mb=args.min_disk_mb,
-    )
+# Create typer app
+app = typer.Typer(
+    help="Sync Claude web app projects to local storage for Claude Code.",
+    add_completion=False,  # Disable shell completion for simpler install
+    no_args_is_help=False,  # Allow running without args for auto-discover
+    rich_markup_mode="rich",  # Enable rich formatting
+)
 
 
 def list_organizations(config: Config) -> int:
@@ -1988,25 +2015,113 @@ def list_organizations(config: Config) -> int:
     except APIError as e:
         log.error(f"API error:\n{e}")
         return 1
+@app.command()
+def main(
+    org_uuid: Annotated[
+        Optional[str],
+        typer.Argument(
+            help="Organization UUID (optional if only one org, or set CLAUDE_ORG_UUID)",
+            envvar="CLAUDE_ORG_UUID",
+        ),
+    ] = None,
+    list_orgs: Annotated[
+        bool,
+        typer.Option("--list-orgs", help="List available organizations and exit"),
+    ] = False,
+    output: Annotated[
+        Path,
+        typer.Option("-o", "--output", help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})"),
+    ] = DEFAULT_OUTPUT_DIR,
+    browser: Annotated[
+        Browser,
+        typer.Option("-b", "--browser", help="Browser to extract cookies from (default: edge)", case_sensitive=False),
+    ] = Browser.edge,
+    skip_conversations: Annotated[
+        bool,
+        typer.Option("--skip-conversations", help="Skip syncing project conversations (faster sync)"),
+    ] = False,
+    include_standalone: Annotated[
+        bool,
+        typer.Option("--include-standalone", help="Include standalone conversations (not in projects)"),
+    ] = False,
+    project: Annotated[
+        Optional[str],
+        typer.Option("-p", "--project", help="Sync only this project (UUID or name substring match)"),
+    ] = None,
+    full: Annotated[
+        bool,
+        typer.Option("--full", help="Force full sync, ignore cached state"),
+    ] = False,
+    no_git: Annotated[
+        bool,
+        typer.Option("--no-git", help="Disable automatic git init and commit"),
+    ] = False,
+    verbose: Annotated[
+        bool,
+        typer.Option("-v", "--verbose", help="Enable verbose output"),
+    ] = False,
+    min_disk_mb: Annotated[
+        int,
+        typer.Option("--min-disk-mb", help="Minimum free disk space in MB (default: 100)", metavar="MB"),
+    ] = 100,
+) -> None:
+    """Sync Claude web app projects to local storage.
 
+    Examples:
 
-def main(argv: list[str] | None = None) -> int:
-    """Main entry point.
+      claude_sync.py                                    # Auto-discover org (if only one)
 
-    Args:
-        argv: Command line arguments (defaults to sys.argv[1:])
+      claude_sync.py --list-orgs                        # List available organizations
 
-    Returns:
-        Exit code
+      claude_sync.py f3e5048f-1380-4436-83cf-085832fff594
+
+      claude_sync.py f3e5048f-1380-4436-83cf-085832fff594 -o ./my-projects
+
+    Finding your org UUID:
+
+      Run with --list-orgs to see available organizations, or:
+
+      1. Open claude.ai, log in
+
+      2. DevTools (F12) > Network tab
+
+      3. Filter for 'organizations' in any request URL
+
+    Environment:
+
+      CLAUDE_ORG_UUID    Default organization UUID
+
+      .claude-sync.env   Local config file (checked in cwd and ~/)
     """
-    config = parse_args(argv)
+    # Load config from environment
+    env_config = get_config_from_env()
+
+    # Use environment variable if org_uuid not provided
+    if org_uuid is None:
+        org_uuid = env_config.get("CLAUDE_ORG_UUID")
+
+    # Build Config from args
+    config = Config(
+        org_uuid=org_uuid,
+        output_dir=output,
+        browser=browser.value,  # Convert enum to string
+        skip_conversations=skip_conversations,
+        verbose=verbose,
+        list_orgs=list_orgs,
+        full_sync=full,
+        auto_commit=not no_git,
+        project_filter=project,
+        min_disk_mb=min_disk_mb,
+        include_standalone=include_standalone,
+    )
 
     if config.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
     # Handle --list-orgs
     if config.list_orgs:
-        return list_organizations(config)
+        exit_code = list_organizations(config)
+        raise typer.Exit(code=exit_code)
 
     # Auto-discover org if not provided
     if not config.org_uuid:
@@ -2018,7 +2133,7 @@ def main(argv: list[str] | None = None) -> int:
 
             if len(orgs) == 0:
                 log.error("No organizations found. Are you logged into claude.ai?")
-                return 1
+                raise typer.Exit(code=1)
             elif len(orgs) == 1:
                 config.org_uuid = orgs[0]["uuid"]
                 log.info(f"Auto-selected organization: {orgs[0]['name']}")
@@ -2027,20 +2142,21 @@ def main(argv: list[str] | None = None) -> int:
                 for org in orgs:
                     print(f"  {org['uuid']}  {org['name']}")
                 print("\nOr set CLAUDE_ORG_UUID in .claude-sync.env")
-                return 1
+                raise typer.Exit(code=1)
         except CookieExtractionError as e:
             log.error(f"Cookie extraction failed:\n{e}")
-            return 1
+            raise typer.Exit(code=1)
         except APIError as e:
             log.error(f"API error during discovery:\n{e}")
-            return 1
+            raise typer.Exit(code=1)
 
     try:
-        return sync(config)
+        exit_code = sync(config)
+        raise typer.Exit(code=exit_code)
     except KeyboardInterrupt:
         log.warning("\nSync interrupted")
-        return 130  # Standard SIGINT exit code
+        raise typer.Exit(code=130)  # Standard SIGINT exit code
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    app()
