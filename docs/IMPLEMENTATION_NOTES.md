@@ -64,3 +64,20 @@ Notes collected during implementation for sanity check review.
 - Docs have meaningful names (not all "untitled")
 - prompt_template correctly extracted when present
 - Progress bar (tqdm) works correctly
+
+## Sanity Check Results (2025-12-07)
+
+**Verified:**
+- [x] 16 projects in index.json matches 16 directories
+- [x] CLAUDE.md content matches web UI prompt_template
+- [x] Projects without instructions show fallback message
+- [x] Doc count correct (e.g., apart-lab has 23 docs)
+- [x] Special chars in filenames handled (`:`, `?`, `-` → hyphen)
+- [x] Collision handling works (`_1` suffix added)
+- [x] All output is text (ASCII/JSON), git-trackable
+- [x] ~18s for 16 projects (< 2 min target)
+
+**Example filename sanitization:**
+- `AGI 2.2 - -Long- timelines to advanced AI...` → preserved
+- `Why do people disagree about when powerful AI will arrive?` → `?` removed
+- Duplicates → `ai_emotional_dependency_research_strategy_1.md` (added `_1`)
