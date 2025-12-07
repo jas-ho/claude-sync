@@ -674,6 +674,23 @@ def write_project_output(
     project_dir = output_dir / project_slug
     project_dir.mkdir(parents=True, exist_ok=True)
 
+    # Check for UUID collision - another project might own this directory
+    meta_path = project_dir / "meta.json"
+    if meta_path.exists():
+        try:
+            existing_meta = json.loads(meta_path.read_text())
+            existing_uuid = existing_meta.get("uuid")
+            if existing_uuid and existing_uuid != project.get("uuid"):
+                # Different project owns this directory! This is a collision.
+                log.error(
+                    f"SLUG COLLISION: Directory {project_dir.name} belongs to project "
+                    f"{existing_uuid}, not {project.get('uuid')}. "
+                    f"Please manually rename one of the directories."
+                )
+                raise ValueError(f"Slug collision detected for {project_dir.name}")
+        except json.JSONDecodeError:
+            log.warning(f"Corrupted meta.json in {project_dir}, will overwrite")
+
     # Write CLAUDE.md from prompt_template
     prompt_template = project.get("prompt_template", "")
     claude_md_path = project_dir / "CLAUDE.md"
