@@ -37,6 +37,11 @@ DEFAULT_OUTPUT_DIR = Path.home() / ".local" / "share" / "claude-sync"
 API_BASE = "https://claude.ai/api/organizations"
 SUPPORTED_BROWSERS = ["edge", "chrome"]
 
+# Size limits to prevent memory exhaustion
+MAX_DOC_SIZE_MB = 10  # Skip docs larger than 10MB
+MAX_CONVERSATION_MESSAGES = 10000  # Skip conversations with more than 10k messages
+MAX_TOTAL_SYNC_SIZE_MB = 500  # Warn if total sync exceeds 500MB
+
 # Logging setup
 logging.basicConfig(
     level=logging.INFO,
@@ -843,7 +848,7 @@ def write_project_output(
                 prev_dir = output_dir / prev_slug
                 if prev_dir.exists() and prev_dir != project_dir:
                     log.info(f"Project renamed: '{prev_name}' -> '{project_name}'")
-                    log.debug(f"Removing old directory: {prev_slug}")
+                    log.info(f"Removing old directory: {prev_slug}")
                     shutil.rmtree(prev_dir)
 
     project_dir.mkdir(parents=True, exist_ok=True)
@@ -926,6 +931,14 @@ _No project instructions defined._
         for doc in docs:
             doc_uuid = doc.get("uuid", "")
 
+            # Check doc size before processing
+            content = doc.get("content", "")
+            content_size_mb = len(content.encode('utf-8')) / (1024 * 1024)
+            if content_size_mb > MAX_DOC_SIZE_MB:
+                doc_filename = doc.get("file_name") or doc.get("filename") or "unknown"
+                log.warning(f"Skipping doc '{doc_filename}': {content_size_mb:.1f}MB exceeds {MAX_DOC_SIZE_MB}MB limit")
+                continue
+
             # API uses 'file_name' key
             doc_filename = doc.get("file_name") or doc.get("filename") or "untitled.md"
             # Ensure .md extension
@@ -947,15 +960,30 @@ _No project instructions defined._
                         prev_safe = f"{prev_safe}.md"
                     old_doc_path = docs_dir / prev_safe
                     if old_doc_path.exists():
-                        log.debug(f"Doc renamed: '{prev_filename}' -> '{doc_filename}', removing old file")
+                        log.info(f"Doc renamed: '{prev_filename}' -> '{doc_filename}', removing old file")
                         old_doc_path.unlink()
 
-            # Write doc content
-            doc_content = doc.get("content", "")
+            # Write doc content (already extracted for size check)
             doc_path = docs_dir / unique_filename
             backup_file(doc_path, backup_dir)
-            doc_path.write_text(doc_content, encoding="utf-8")
+            doc_path.write_text(content, encoding="utf-8")
             log.debug(f"Wrote {doc_path}")
+
+        # Detect deleted docs
+        current_doc_uuids = {doc.get("uuid", "") for doc in docs if doc.get("uuid")}
+        for prev_uuid, prev_data in prev_docs.items():
+            if prev_uuid not in current_doc_uuids:
+                # Doc was deleted remotely
+                prev_filename = prev_data.get("filename", "")
+                if prev_filename:
+                    # Apply same sanitization as when writing
+                    prev_safe = sanitize_filename(prev_filename)
+                    if not prev_safe.lower().endswith(".md"):
+                        prev_safe = f"{prev_safe}.md"
+                    old_doc_path = docs_dir / prev_safe
+                    if old_doc_path.exists():
+                        old_doc_path.unlink()
+                        log.info(f"Deleted orphaned doc: {prev_filename}")
 
     return project_dir
 
@@ -1275,7 +1303,7 @@ def write_conversation_output(
             # Conversation was renamed - delete old file
             old_convo_path = convos_dir / prev_filename
             if old_convo_path.exists():
-                log.debug(f"Conversation renamed: '{prev_filename}' -> '{filename}', removing old file")
+                log.info(f"Conversation renamed: '{prev_filename}' -> '{filename}', removing old file")
                 old_convo_path.unlink()
 
     # Build markdown content
@@ -1616,6 +1644,14 @@ def sync(config: Config) -> int:
                                 project_dir.mkdir(parents=True, exist_ok=True)
 
                                 full_convo = fetch_conversation(session, org_uuid, convo_uuid)
+
+                                # Check conversation size before processing
+                                message_count = len(full_convo.get("chat_messages", []))
+                                if message_count > MAX_CONVERSATION_MESSAGES:
+                                    log.warning(f"Skipping conversation '{convo_meta.get('name')}': {message_count} messages exceeds {MAX_CONVERSATION_MESSAGES} limit")
+                                    convos_skipped += 1
+                                    continue
+
                                 filename = write_conversation_output(
                                     full_convo, project_dir, used_convo_filenames, prev_convos
                                 )
@@ -1636,6 +1672,18 @@ def sync(config: Config) -> int:
                             if convo_uuid in prev_convos:
                                 convo_index[convo_uuid] = prev_convos[convo_uuid]
                             convos_skipped += 1
+
+                    # Detect deleted conversations
+                    current_convo_uuids = {c.get("uuid") for c in convo_list}
+                    for prev_uuid, prev_data in prev_convos.items():
+                        if prev_uuid not in current_convo_uuids:
+                            # Conversation was deleted remotely
+                            prev_filename = prev_data.get("filename", "")
+                            if prev_filename:
+                                old_file = project_dir / "conversations" / prev_filename
+                                if old_file.exists():
+                                    old_file.unlink()
+                                    log.info(f"Deleted orphaned conversation: {prev_filename}")
 
                     # Write conversation index
                     if convo_index:

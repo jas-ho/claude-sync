@@ -140,15 +140,48 @@ cat /tmp/claude-sync-test/index.json
 - Projects sync but conversations folder not created/updated
 - Much faster sync time
 
+## Manual Test Results (2025-12-07)
+
+Comprehensive testing session validating incremental sync detection across all change scenarios:
+
+| # | Scenario | Result | Notes |
+|---|----------|--------|-------|
+| 1 | Conversation message added | ✅ Fixed | Detected independently (bug 655 fixed) |
+| 2 | New doc added | ✅ Pass | Doc count change detected |
+| 3 | Duplicate filename doc | ✅ Pass | Handled with `_1` suffix |
+| 4 | New conversation only | ✅ Fixed | Detected independently (bug 655 fixed) |
+| 5 | Instructions changed | ✅ Pass | `updated_at` changed |
+| 6 | Doc/convo deleted | ⚠️ Partial | Orphan files remain (tracked in daw) |
+| 7 | Conversation renamed | ✅ Fixed | Old file deleted (bug ivi fixed) |
+| 8 | Project renamed | ✅ Fixed | Old folder deleted (bug ivi fixed) |
+
+### Key Findings
+
+#### What updates project `updated_at`:
+- Project name change ✓
+- Project instructions (prompt_template) change ✓
+
+#### What does NOT update project `updated_at`:
+- New conversation
+- Message added to conversation
+- Conversation renamed
+- Doc changes (detected via content hash instead)
+
+### Bugs Fixed in This Session
+- `claude-sync-655`: Conversations now checked independently (even when project `updated_at` unchanged)
+- `claude-sync-ivi`: Renames handled gracefully (old files/folders deleted automatically)
+- `claude-sync-l4u`: Atomic writes for state files (prevents corruption on interruption)
+- `claude-sync-1j3`: Safe timestamp comparisons (handles None values correctly)
+
 ## Known Limitations
 
-### Renames Not Handled
-If you rename a project/document/conversation on claude.ai:
-- Old local file persists
-- New file created with new name
-- Results in duplicate content
+### Deleted Items (Tracked in claude-sync-daw)
+If you delete a project/document/conversation on claude.ai:
+- Orphaned files remain in local storage
+- Not automatically deleted (safety first)
+- Manual cleanup required
 
-**Workaround**: Delete output directory and run `--full` sync after renames.
+**Future enhancement**: Orphan detection and cleanup with confirmation prompt.
 
 ### Deleted Projects
 - Deleted projects are marked as "orphaned" in index.json
