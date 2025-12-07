@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
@@ -66,6 +67,25 @@ def _handle_interrupt(signum, frame):
 
 # Lock file for preventing concurrent syncs
 LOCK_FILE = ".claude-sync.lock"
+
+# Temp directory prefix for atomic operations
+TEMP_DIR_PREFIX = ".tmp_"
+
+
+def cleanup_temp_dirs(output_dir: Path) -> None:
+    """Remove orphaned temp directories from previous failed syncs.
+
+    Args:
+        output_dir: Base output directory to scan
+    """
+    if not output_dir.exists():
+        return
+
+    orphaned = list(output_dir.glob(f"{TEMP_DIR_PREFIX}*"))
+    for temp_dir in orphaned:
+        if temp_dir.is_dir():
+            log.debug(f"Removing orphaned temp directory: {temp_dir.name}")
+            shutil.rmtree(temp_dir)
 
 
 def acquire_lock(output_dir: Path) -> int:
@@ -1539,6 +1559,17 @@ def sync(config: Config) -> int:
 
     synced_at = datetime.now(timezone.utc).isoformat()
 
+    # Initialize metrics tracking
+    start_time = time.time()
+    metrics = {
+        'projects_checked': 0,
+        'projects_synced': 0,
+        'projects_skipped': 0,
+        'conversations_synced': 0,
+        'conversations_skipped': 0,
+        'orphaned_projects': 0,
+    }
+
     try:
         # Step 1: Get session cookies
         log.info("Extracting session cookies...")
@@ -1574,11 +1605,16 @@ def sync(config: Config) -> int:
 
         # Step 4: Load previous sync state (for incremental sync)
         config.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Step 4.5: Clean up orphaned temp directories from previous failed syncs
+        cleanup_temp_dirs(config.output_dir)
+
         prev_state = {} if config.full_sync else load_sync_state(config.output_dir)
         new_state = {"synced_at": synced_at, "projects": {}}
 
         # Step 5: Process each project
         synced_projects = []
+        failed_projects: list[tuple[str, str]] = []  # (project_name, error_message)
         synced_count = 0
         skipped_count = 0
 
@@ -1591,123 +1627,140 @@ def sync(config: Config) -> int:
             project_name = project.get("name", "Unknown")
             log.debug(f"Processing: {project_name}")
 
-            # Fetch full project details (includes prompt_template)
-            full_project = fetch_project_details(session, org_uuid, project_uuid)
+            # Track that we checked this project
+            metrics['projects_checked'] += 1
 
-            # Fetch docs
-            docs = fetch_project_docs(session, org_uuid, project_uuid)
-            full_project["_docs_count"] = len(docs)
+            # Wrap entire project sync in try-except to handle failures gracefully
+            try:
+                # Fetch full project details (includes prompt_template)
+                full_project = fetch_project_details(session, org_uuid, project_uuid)
 
-            # Check if sync needed (incremental)
-            needs_sync, reason = project_needs_sync(full_project, docs, prev_state)
+                # Fetch docs
+                docs = fetch_project_docs(session, org_uuid, project_uuid)
+                full_project["_docs_count"] = len(docs)
 
-            # Compute project directory deterministically (needed for conversations)
-            project_slug = make_project_slug(project_name, project_uuid)
-            project_dir = config.output_dir / project_slug
+                # Check if sync needed (incremental)
+                needs_sync, reason = project_needs_sync(full_project, docs, prev_state)
 
-            # Track if we actually synced anything for this project
-            project_synced = False
+                # Compute project directory deterministically (needed for conversations)
+                project_slug = make_project_slug(project_name, project_uuid)
+                project_dir = config.output_dir / project_slug
 
-            # Sync project metadata and docs if needed
-            if needs_sync or config.full_sync:
-                log.debug(f"Syncing {project_name}: {reason}")
-                project_dir = write_project_output(full_project, docs, config.output_dir, prev_state)
-                project_synced = True
+                # Track if we actually synced anything for this project
+                project_synced = False
 
-            # Sync conversations independently (always check unless --skip-conversations)
-            # Conversations don't update project.updated_at, so we need to check them separately
-            if not config.skip_conversations:
-                convo_list = fetch_project_conversations(session, org_uuid, project_uuid)
-                if convo_list:
-                    # Get previous conversation state for incremental sync
-                    prev_project_state = prev_state.get("projects", {}).get(project_uuid, {})
-                    prev_convos = prev_project_state.get("conversations", {})
+                # Sync project metadata and docs if needed
+                if needs_sync or config.full_sync:
+                    log.debug(f"Syncing {project_name}: {reason}")
+                    project_dir = write_project_output(full_project, docs, config.output_dir, prev_state)
+                    project_synced = True
 
-                    convos_synced = 0
-                    convos_skipped = 0
-                    used_convo_filenames: set[str] = set()
-                    convo_index: dict[str, dict] = {}
+                # Sync conversations independently (always check unless --skip-conversations)
+                # Conversations don't update project.updated_at, so we need to check them separately
+                if not config.skip_conversations:
+                    convo_list = fetch_project_conversations(session, org_uuid, project_uuid)
+                    if convo_list:
+                        # Get previous conversation state for incremental sync
+                        prev_project_state = prev_state.get("projects", {}).get(project_uuid, {})
+                        prev_convos = prev_project_state.get("conversations", {})
 
-                    for convo_meta in convo_list:
-                        convo_uuid = convo_meta.get("uuid")
-                        if not convo_uuid:
-                            continue
+                        convos_synced = 0
+                        convos_skipped = 0
+                        used_convo_filenames: set[str] = set()
+                        convo_index: dict[str, dict] = {}
 
-                        # Check if conversation needs sync (incremental)
-                        convo_needs_sync, convo_reason = conversation_needs_sync(
-                            convo_meta, prev_convos, config.full_sync
-                        )
+                        for convo_meta in convo_list:
+                            convo_uuid = convo_meta.get("uuid")
+                            if not convo_uuid:
+                                continue
 
-                        if convo_needs_sync:
-                            try:
-                                # Ensure project directory exists before writing conversations
-                                project_dir.mkdir(parents=True, exist_ok=True)
+                            # Check if conversation needs sync (incremental)
+                            convo_needs_sync, convo_reason = conversation_needs_sync(
+                                convo_meta, prev_convos, config.full_sync
+                            )
 
-                                full_convo = fetch_conversation(session, org_uuid, convo_uuid)
+                            if convo_needs_sync:
+                                try:
+                                    # Ensure project directory exists before writing conversations
+                                    project_dir.mkdir(parents=True, exist_ok=True)
 
-                                # Check conversation size before processing
-                                message_count = len(full_convo.get("chat_messages", []))
-                                if message_count > MAX_CONVERSATION_MESSAGES:
-                                    log.warning(f"Skipping conversation '{convo_meta.get('name')}': {message_count} messages exceeds {MAX_CONVERSATION_MESSAGES} limit")
-                                    convos_skipped += 1
-                                    continue
+                                    full_convo = fetch_conversation(session, org_uuid, convo_uuid)
 
-                                filename = write_conversation_output(
-                                    full_convo, project_dir, used_convo_filenames, prev_convos
-                                )
-                                if filename:
-                                    convo_index[convo_uuid] = {
-                                        "name": convo_meta.get("name", "Untitled"),
-                                        "filename": filename,
-                                        "created_at": convo_meta.get("created_at"),
-                                        "updated_at": convo_meta.get("updated_at"),
-                                        "message_count": len(full_convo.get("chat_messages", [])),
-                                    }
-                                    convos_synced += 1
-                                    project_synced = True  # Mark that we synced something
-                            except (APIError, FileNotFoundError) as e:
-                                log.warning(f"Failed to fetch conversation {convo_uuid}: {e}")
-                        else:
-                            # Keep previous index entry for unchanged conversations
-                            if convo_uuid in prev_convos:
-                                convo_index[convo_uuid] = prev_convos[convo_uuid]
-                            convos_skipped += 1
+                                    # Check conversation size before processing
+                                    message_count = len(full_convo.get("chat_messages", []))
+                                    if message_count > MAX_CONVERSATION_MESSAGES:
+                                        log.warning(f"Skipping conversation '{convo_meta.get('name')}': {message_count} messages exceeds {MAX_CONVERSATION_MESSAGES} limit")
+                                        convos_skipped += 1
+                                        continue
 
-                    # Detect deleted conversations
-                    current_convo_uuids = {c.get("uuid") for c in convo_list}
-                    for prev_uuid, prev_data in prev_convos.items():
-                        if prev_uuid not in current_convo_uuids:
-                            # Conversation was deleted remotely
-                            prev_filename = prev_data.get("filename", "")
-                            if prev_filename:
-                                old_file = project_dir / "conversations" / prev_filename
-                                if old_file.exists():
-                                    old_file.unlink()
-                                    log.info(f"Deleted orphaned conversation: {prev_filename}")
+                                    filename = write_conversation_output(
+                                        full_convo, project_dir, used_convo_filenames, prev_convos
+                                    )
+                                    if filename:
+                                        convo_index[convo_uuid] = {
+                                            "name": convo_meta.get("name", "Untitled"),
+                                            "filename": filename,
+                                            "created_at": convo_meta.get("created_at"),
+                                            "updated_at": convo_meta.get("updated_at"),
+                                            "message_count": len(full_convo.get("chat_messages", [])),
+                                        }
+                                        convos_synced += 1
+                                        metrics['conversations_synced'] += 1
+                                        project_synced = True  # Mark that we synced something
+                                except (APIError, FileNotFoundError) as e:
+                                    log.warning(f"Failed to fetch conversation {convo_uuid}: {e}")
+                            else:
+                                # Keep previous index entry for unchanged conversations
+                                if convo_uuid in prev_convos:
+                                    convo_index[convo_uuid] = prev_convos[convo_uuid]
+                                convos_skipped += 1
+                                metrics['conversations_skipped'] += 1
 
-                    # Write conversation index
-                    if convo_index:
-                        project_dir.mkdir(parents=True, exist_ok=True)
-                        write_conversation_index(project_dir, convo_index, synced_at)
+                        # Detect deleted conversations
+                        current_convo_uuids = {c.get("uuid") for c in convo_list}
+                        for prev_uuid, prev_data in prev_convos.items():
+                            if prev_uuid not in current_convo_uuids:
+                                # Conversation was deleted remotely
+                                prev_filename = prev_data.get("filename", "")
+                                if prev_filename:
+                                    old_file = project_dir / "conversations" / prev_filename
+                                    if old_file.exists():
+                                        old_file.unlink()
+                                        log.info(f"Deleted orphaned conversation: {prev_filename}")
 
-                    if convos_skipped > 0:
-                        log.debug(f"Conversations: {convos_synced} synced, {convos_skipped} skipped")
-                    elif convos_synced > 0:
-                        log.debug(f"Conversations: {convos_synced} synced")
+                        # Write conversation index
+                        if convo_index:
+                            project_dir.mkdir(parents=True, exist_ok=True)
+                            write_conversation_index(project_dir, convo_index, synced_at)
 
-                    # Store conversation state for next sync
-                    full_project["_conversations"] = convo_index
+                        if convos_skipped > 0:
+                            log.debug(f"Conversations: {convos_synced} synced, {convos_skipped} skipped")
+                        elif convos_synced > 0:
+                            log.debug(f"Conversations: {convos_synced} synced")
 
-            # Update counters
-            if project_synced:
-                synced_count += 1
-            else:
-                log.debug(f"Skipping {project_name}: {reason}")
-                skipped_count += 1
+                        # Store conversation state for next sync
+                        full_project["_conversations"] = convo_index
 
-            # Build state for this project (always update state)
-            new_state["projects"][project_uuid] = build_project_state(full_project, docs)
-            synced_projects.append(full_project)
+                # Update counters
+                if project_synced:
+                    synced_count += 1
+                    metrics['projects_synced'] += 1
+                else:
+                    log.debug(f"Skipping {project_name}: {reason}")
+                    skipped_count += 1
+                    metrics['projects_skipped'] += 1
+
+                # Build state for this project (always update state)
+                new_state["projects"][project_uuid] = build_project_state(full_project, docs)
+                synced_projects.append(full_project)
+
+            except Exception as e:
+                # Project sync failed - log error and continue with other projects
+                error_msg = str(e)
+                log.error(f"Failed to sync project '{project_name}': {error_msg}")
+                failed_projects.append((project_name, error_msg))
+                # Don't add to synced_projects or new_state - exclude from index.json
+                continue
 
         # Step 6: Detect deleted projects and mark as orphaned
         deleted_uuids = detect_deleted_projects(prev_state, projects)
@@ -1721,6 +1774,7 @@ def sync(config: Config) -> int:
                 "_orphaned": True,
                 "_orphaned_at": synced_at,
             })
+            metrics['orphaned_projects'] += 1
             log.warning(f"Project '{prev_project.get('name', deleted_uuid)}' deleted remotely (local files kept)")
 
         # Step 7: Write index and save sync state
@@ -1731,11 +1785,25 @@ def sync(config: Config) -> int:
         if config.auto_commit:
             git_auto_commit(config.output_dir)
 
-        # Summary
-        if skipped_count > 0:
-            log.info(f"Sync complete! {synced_count} updated, {skipped_count} unchanged")
-        else:
-            log.info(f"Sync complete! {len(projects)} projects synced to {config.output_dir}")
+        # Print metrics summary
+        elapsed = time.time() - start_time
+        print(f"\nSync complete in {elapsed:.1f}s")
+        print(f"  Projects: {metrics['projects_checked']} checked, {metrics['projects_synced']} synced, {metrics['projects_skipped']} skipped")
+        if not config.skip_conversations:
+            print(f"  Conversations: {metrics['conversations_synced']} synced, {metrics['conversations_skipped']} skipped")
+        if metrics['orphaned_projects'] > 0:
+            print(f"  Orphaned: {metrics['orphaned_projects']} project(s) deleted remotely")
+        print(f"  Output: {config.output_dir}")
+
+        # Report failures if any
+        if failed_projects:
+            print(f"\nWARNING: {len(failed_projects)} project(s) failed to sync:")
+            for proj_name, error in failed_projects:
+                # Truncate error message if too long
+                error_short = error if len(error) <= 100 else f"{error[:97]}..."
+                print(f"  - {proj_name}: {error_short}")
+            print("\nFailed projects were excluded from index.json and will be retried on next sync.")
+            return 1  # Non-zero exit code to indicate partial failure
 
         return 0
 
