@@ -29,7 +29,8 @@ if TYPE_CHECKING:
     from curl_cffi import requests
 
 # Constants
-DEFAULT_OUTPUT_DIR = Path.home() / ".claude" / "synced-projects"
+# Use XDG-compliant data location (not ~/.claude which is for Claude Code config)
+DEFAULT_OUTPUT_DIR = Path.home() / ".local" / "share" / "claude-sync"
 API_BASE = "https://claude.ai/api/organizations"
 SUPPORTED_BROWSERS = ["edge", "chrome"]
 
@@ -304,14 +305,14 @@ def _api_request(
 
 
 def fetch_projects(session: "requests.Session", org_uuid: str) -> list[dict]:
-    """Fetch all projects for an organization.
+    """Fetch all projects for an organization (list only, no prompt_template).
 
     Args:
         session: Authenticated requests session
         org_uuid: Organization UUID
 
     Returns:
-        List of project dicts with full metadata
+        List of project dicts (basic metadata only)
     """
     url = f"{API_BASE}/{org_uuid}/projects"
     projects = _api_request(session, url)
@@ -321,6 +322,28 @@ def fetch_projects(session: "requests.Session", org_uuid: str) -> list[dict]:
 
     log.debug(f"Fetched {len(projects)} projects")
     return projects
+
+
+def fetch_project_details(
+    session: "requests.Session", org_uuid: str, project_uuid: str
+) -> dict:
+    """Fetch full project details including prompt_template.
+
+    Args:
+        session: Authenticated requests session
+        org_uuid: Organization UUID
+        project_uuid: Project UUID
+
+    Returns:
+        Project dict with full metadata including prompt_template
+    """
+    url = f"{API_BASE}/{org_uuid}/projects/{project_uuid}"
+    project = _api_request(session, url)
+
+    if not isinstance(project, dict):
+        raise APIError(f"Unexpected response format: expected dict, got {type(project)}")
+
+    return project
 
 
 def fetch_project_docs(
@@ -545,19 +568,118 @@ def write_project_output(
     Returns:
         Path to created project directory
     """
-    # TODO: Implement in task 8co.7
-    raise NotImplementedError("Output structure not yet implemented")
+    from datetime import datetime, timezone
+
+    project_uuid = project["uuid"]
+    project_name = project.get("name", "Unnamed Project")
+
+    # Create project directory
+    project_slug = make_project_slug(project_name, project_uuid)
+    project_dir = output_dir / project_slug
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write CLAUDE.md from prompt_template
+    prompt_template = project.get("prompt_template", "")
+    claude_md_path = project_dir / "CLAUDE.md"
+
+    synced_at = datetime.now(timezone.utc).isoformat()
+
+    if prompt_template:
+        claude_md_content = f"""---
+synced_at: {synced_at}
+source: claude.ai/project/{project_uuid}
+---
+
+{prompt_template}
+"""
+    else:
+        claude_md_content = f"""---
+synced_at: {synced_at}
+source: claude.ai/project/{project_uuid}
+---
+
+# {project_name}
+
+_No project instructions defined._
+"""
+
+    claude_md_path.write_text(claude_md_content, encoding="utf-8")
+    log.debug(f"Wrote {claude_md_path}")
+
+    # Write meta.json with full project metadata
+    meta = {
+        "uuid": project_uuid,
+        "name": project_name,
+        "description": project.get("description", ""),
+        "created_at": project.get("created_at"),
+        "updated_at": project.get("updated_at"),
+        "is_private": project.get("is_private", True),
+        "synced_at": synced_at,
+    }
+    meta_path = project_dir / "meta.json"
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    log.debug(f"Wrote {meta_path}")
+
+    # Write docs
+    if docs:
+        docs_dir = project_dir / "docs"
+        docs_dir.mkdir(exist_ok=True)
+
+        used_filenames: set[str] = set()
+        for doc in docs:
+            # API uses 'file_name' key
+            doc_filename = doc.get("file_name") or doc.get("filename") or "untitled.md"
+            # Ensure .md extension
+            if not doc_filename.lower().endswith(".md"):
+                doc_filename = f"{doc_filename}.md"
+
+            # Sanitize and make unique
+            safe_filename = sanitize_filename(doc_filename)
+            unique_filename = get_unique_filename(safe_filename, used_filenames)
+            used_filenames.add(unique_filename)
+
+            # Write doc content
+            doc_content = doc.get("content", "")
+            doc_path = docs_dir / unique_filename
+            doc_path.write_text(doc_content, encoding="utf-8")
+            log.debug(f"Wrote {doc_path}")
+
+    return project_dir
 
 
-def write_index(projects: list[dict], output_dir: Path) -> None:
+def write_index(
+    projects: list[dict], output_dir: Path, org_uuid: str, synced_at: str
+) -> None:
     """Write index.json manifest file.
 
     Args:
-        projects: List of synced project metadata
+        projects: List of project dicts (with 'docs_count' added)
         output_dir: Base output directory
+        org_uuid: Organization UUID
+        synced_at: ISO timestamp of sync
     """
-    # TODO: Implement in task 8co.7
-    raise NotImplementedError("Output structure not yet implemented")
+    index = {
+        "synced_at": synced_at,
+        "org_id": org_uuid,
+        "projects": {},
+    }
+
+    for project in projects:
+        project_uuid = project["uuid"]
+        project_name = project.get("name", "Unnamed Project")
+        project_slug = make_project_slug(project_name, project_uuid)
+
+        index["projects"][project_uuid] = {
+            "name": project_name,
+            "slug": project_slug,
+            "path": f"{project_slug}/",
+            "updated_at": project.get("updated_at"),
+            "docs_count": project.get("_docs_count", 0),
+        }
+
+    index_path = output_dir / "index.json"
+    index_path.write_text(json.dumps(index, indent=2), encoding="utf-8")
+    log.info(f"Wrote {index_path}")
 
 
 # =============================================================================
@@ -574,9 +696,15 @@ def sync(config: Config) -> int:
     Returns:
         Exit code (0 for success)
     """
+    from datetime import datetime, timezone
+
+    from tqdm import tqdm
+
     log.info(f"Syncing organization {config.org_uuid}")
     log.info(f"Output directory: {config.output_dir}")
     log.info(f"Browser: {config.browser}")
+
+    synced_at = datetime.now(timezone.utc).isoformat()
 
     try:
         # Step 1: Get session cookies
@@ -594,15 +722,27 @@ def sync(config: Config) -> int:
         # Step 4: Fetch docs and write output for each project
         config.output_dir.mkdir(parents=True, exist_ok=True)
 
-        for project in projects:
-            log.info(f"Processing: {project.get('name', 'Unknown')}")
+        synced_projects = []
+        for project in tqdm(projects, desc="Syncing projects", unit="project"):
+            project_name = project.get("name", "Unknown")
+            log.debug(f"Processing: {project_name}")
+
+            # Fetch full project details (includes prompt_template)
+            full_project = fetch_project_details(
+                session, config.org_uuid, project["uuid"]
+            )
+
+            # Fetch docs
             docs = fetch_project_docs(session, config.org_uuid, project["uuid"])
-            write_project_output(project, docs, config.output_dir)
+            full_project["_docs_count"] = len(docs)  # Track for index
+
+            write_project_output(full_project, docs, config.output_dir)
+            synced_projects.append(full_project)
 
         # Step 5: Write index
-        write_index(projects, config.output_dir)
+        write_index(synced_projects, config.output_dir, config.org_uuid, synced_at)
 
-        log.info("Sync complete!")
+        log.info(f"Sync complete! {len(projects)} projects synced to {config.output_dir}")
         return 0
 
     except CookieExtractionError as e:
