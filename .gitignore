@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Beads database (JSONL is tracked, not SQLite)
+.beads/*.db
+
+# Synced data (lives outside repo by default)
+# If syncing to local folder, uncomment:
+# synced-projects/
+
+# AI planning docs (ephemeral)
+history/
+
+# Test outputs
+/tmp/
+*.log
