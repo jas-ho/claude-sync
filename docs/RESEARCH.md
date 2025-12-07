@@ -70,7 +70,11 @@ From analysis of existing exports:
   "chat_messages": [
     {
       "uuid": "...",
-      "text": "...",
+      "text": "",  // NOTE: Always empty - actual content is in 'content' array
+      "content": [
+        {"type": "text", "text": "actual message content"},
+        {"type": "thinking", "thinking": "Claude's thinking (if extended thinking enabled)"}
+      ],
       "sender": "human|assistant",
       "created_at": "...",
       "updated_at": "..."
