@@ -48,9 +48,7 @@ Notes collected during implementation for sanity check review.
 ## Known Issues / TODOs
 
 1. **Multiple orgs with same name**: User has two "Apart Research" orgs - no way to distinguish except by UUID
-2. **No incremental sync yet**: Always re-downloads everything
-3. **Conversations not implemented**: Task 8co.11
-4. **No error recovery**: If one project fails, whole sync fails (task 8co.10)
+2. **No error recovery**: If one project fails, whole sync fails (task 8co.10)
 
 ## Performance
 

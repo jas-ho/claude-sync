@@ -123,7 +123,7 @@ project/
 │       └── webapp-context/      # Synced web app content as a skill
 │           ├── SKILL.md
 │           └── docs/
-└── synced-projects/             # Raw synced data
+└── ~/.local/share/claude-sync/  # Raw synced data
     └── apart-lab-general/
         ├── CLAUDE.md            # Project instructions
         └── docs/
@@ -184,7 +184,7 @@ project/
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Local Storage                                 │
-│  ~/.claude/synced-projects/                                      │
+│  ~/.local/share/claude-sync/                                     │
 │  ├── index.json              # Manifest with sync metadata       │
 │  ├── apart-lab-general/                                          │
 │  │   ├── CLAUDE.md           # Project instructions              │
@@ -200,8 +200,8 @@ project/
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │ ~/.claude/CLAUDE.md                                        │  │
 │  │ # Synced Web App Projects                                  │  │
-│  │ @~/.claude/synced-projects/apart-lab-general/CLAUDE.md     │  │
-│  │ @~/.claude/synced-projects/email-style/CLAUDE.md           │  │
+│  │ @~/.local/share/claude-sync/apart-lab-general/CLAUDE.md    │  │
+│  │ @~/.local/share/claude-sync/email-style/CLAUDE.md          │  │
 │  └───────────────────────────────────────────────────────────┘  │
 │                                                                  │
 │  OR via MCP server for dynamic access                            │
@@ -213,7 +213,7 @@ project/
 To enable incremental sync and prevent overwrites:
 
 ```json
-// ~/.claude/synced-projects/index.json
+// ~/.local/share/claude-sync/index.json
 {
   "last_sync": "2025-01-15T10:30:00Z",
   "org_id": "...",
@@ -260,7 +260,7 @@ Since we can't push changes back:
 
 **Output Structure**:
 ```
-~/.claude/synced-projects/
+~/.local/share/claude-sync/
 ├── index.json
 ├── apart-lab-general/
 │   ├── CLAUDE.md           # From prompt_template
@@ -273,7 +273,7 @@ Since we can't push changes back:
 **Integration**: Add to `~/.claude/CLAUDE.md`:
 ```markdown
 # Synced Web App Projects
-@~/.claude/synced-projects/apart-lab-general/CLAUDE.md
+@~/.local/share/claude-sync/apart-lab-general/CLAUDE.md
 ```
 
 ### Phase 2: Incremental Sync - "Smart Updates"
@@ -363,7 +363,7 @@ Need to handle:
 ## 6. Open Questions
 
 1. **Conversation sync depth**: All conversations or just recent N? Project-associated only?
-2. **Storage location**: `~/.claude/synced-projects/` vs project-local?
+2. **Storage location**: `~/.local/share/claude-sync/` vs project-local?
 3. **MCP vs static files**: Is dynamic MCP access worth the complexity?
 4. **Multi-org support**: Handle multiple organizations?
 5. **Automation**: Run on schedule (launchd/cron) or manual only?

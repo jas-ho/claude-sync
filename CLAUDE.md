@@ -14,7 +14,7 @@ Sync Claude web app projects (claude.ai) to local storage for use with Claude Co
 ## Architecture
 
 Single UV script (`claude_sync.py`) with inline dependencies:
-- `requests` - API calls
+- `curl_cffi` - API calls (Cloudflare bypass)
 - `browser-cookie3` - Session extraction from Edge/Chrome
 - `tqdm` - Progress display
 
@@ -37,7 +37,7 @@ Single UV script (`claude_sync.py`) with inline dependencies:
 ## Development Guidelines
 
 - Single-file UV script with inline deps for portability
-- Configurable output location (default: `~/.claude/synced-projects/`)
+- Configurable output location (default: `~/.local/share/claude-sync/`)
 - User-agnostic: No hardcoded paths or personal data
 - Robust filename sanitization (cross-platform)
 
