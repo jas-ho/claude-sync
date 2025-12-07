@@ -41,6 +41,9 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# Global flag for graceful interrupt handling
+_interrupted = False
+
 
 @dataclass
 class Config:
@@ -872,6 +875,12 @@ def project_needs_sync(
 
     if current_updated != prev_updated:
         return True, f"updated ({prev_updated[:10]} → {current_updated[:10]})"
+
+    # Check prompt_template (instructions) changed
+    current_template_hash = compute_doc_hash(project.get("prompt_template", ""))
+    prev_template_hash = prev_project.get("prompt_template_hash", "")
+    if current_template_hash != prev_template_hash:
+        return True, "instructions changed"
 
     # Check doc count changed
     prev_doc_count = len(prev_project.get("docs", {}))
