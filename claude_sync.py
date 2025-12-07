@@ -45,6 +45,17 @@ log = logging.getLogger(__name__)
 _interrupted = False
 
 
+def _handle_interrupt(signum, frame):
+    """Handle interrupt signals gracefully."""
+    global _interrupted
+    if _interrupted:
+        # Second interrupt - force exit
+        log.warning("\nForce exit requested")
+        sys.exit(130)
+    _interrupted = True
+    log.warning("\nInterrupt received, finishing current project...")
+
+
 @dataclass
 class Config:
     """Runtime configuration for sync operation."""
@@ -1204,6 +1215,13 @@ def sync(config: Config) -> int:
 
     from tqdm import tqdm
 
+    # Set up signal handlers for graceful interruption
+    import signal
+    signal.signal(signal.SIGINT, _handle_interrupt)
+    signal.signal(signal.SIGTERM, _handle_interrupt)
+    global _interrupted
+    _interrupted = False  # Reset for this sync run
+
     # org_uuid is guaranteed to be set by main() at this point
     assert config.org_uuid is not None
     org_uuid = config.org_uuid
@@ -1262,6 +1280,10 @@ def sync(config: Config) -> int:
         skipped_count = 0
 
         for project in tqdm(projects, desc="Syncing projects", unit="project"):
+            if _interrupted:
+                log.info("Stopping sync early due to interrupt")
+                break
+
             project_uuid = project["uuid"]
             project_name = project.get("name", "Unknown")
             log.debug(f"Processing: {project_name}")
@@ -1593,7 +1615,11 @@ def main(argv: list[str] | None = None) -> int:
             log.error(f"API error during discovery:\n{e}")
             return 1
 
-    return sync(config)
+    try:
+        return sync(config)
+    except KeyboardInterrupt:
+        log.warning("\nSync interrupted")
+        return 130  # Standard SIGINT exit code
 
 
 if __name__ == "__main__":
