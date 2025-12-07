@@ -58,6 +58,48 @@ def _handle_interrupt(signum, frame):
     log.warning("\nInterrupt received, finishing current project...")
 
 
+# Lock file for preventing concurrent syncs
+LOCK_FILE = ".claude-sync.lock"
+
+
+def acquire_lock(output_dir: Path) -> int:
+    """Acquire exclusive lock for sync. Returns file descriptor.
+
+    Raises:
+        RuntimeError: If another sync is already running
+    """
+    lock_path = output_dir / LOCK_FILE
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        # Try to read PID from lock file
+        try:
+            with open(lock_path) as f:
+                pid = f.read().strip()
+            raise RuntimeError(f"Another sync is running (PID: {pid})")
+        except:
+            raise RuntimeError("Another sync is running")
+
+    # Write our PID
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, str(os.getpid()).encode())
+    return fd
+
+
+def release_lock(fd: int) -> None:
+    """Release sync lock."""
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    except:
+        pass  # Best effort
+
+
 @dataclass
 class Config:
     """Runtime configuration for sync operation."""
@@ -1332,6 +1374,14 @@ def sync(config: Config) -> int:
         log.error(str(e))
         return 1
 
+    # Acquire exclusive lock
+    lock_fd = None
+    try:
+        lock_fd = acquire_lock(config.output_dir)
+    except RuntimeError as e:
+        log.error(str(e))
+        return 1
+
     synced_at = datetime.now(timezone.utc).isoformat()
 
     try:
@@ -1517,6 +1567,9 @@ def sync(config: Config) -> int:
             tb = traceback.format_exc()
             log.error(sanitize_sensitive_data(tb))
         return 1
+    finally:
+        if lock_fd is not None:
+            release_lock(lock_fd)
 
 
 def parse_args(argv: list[str] | None = None) -> Config:
