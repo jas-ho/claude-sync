@@ -759,8 +759,22 @@ SYNC_STATE_FILE = ".sync-state.json"
 
 
 def compute_doc_hash(content: str) -> str:
-    """Compute hash of document content for change detection."""
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+    """Compute hash of document content for change detection.
+
+    Normalizes content before hashing to avoid false positives from:
+    - Unicode normalization differences (NFD vs NFC)
+    - Line ending differences (CRLF vs LF vs CR)
+
+    Note: Hash algorithm changed in v1.x to include normalization.
+    First sync after upgrade will re-sync all content (expected).
+    """
+    # Normalize unicode to NFC (composed form)
+    normalized = unicodedata.normalize("NFC", content)
+
+    # Normalize line endings to LF
+    normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
+
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 
 def load_sync_state(output_dir: Path) -> dict:
