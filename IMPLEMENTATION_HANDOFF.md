@@ -20,13 +20,13 @@ Create a single-file Python script (`claude_sync.py`) that syncs Claude web app 
    #!/usr/bin/env -S uv run --script
    # /// script
    # requires-python = ">=3.12"
-   # dependencies = ["requests<3", "tqdm", "browser-cookie3"]
+   # dependencies = ["curl_cffi", "tqdm", "browser-cookie3"]
    # ///
    ```
 
 2. **Output structure**:
    ```
-   ~/.claude/synced-projects/
+   ~/.local/share/claude-sync/
    ├── index.json
    └── <project-slug>-<uuid>/
        ├── CLAUDE.md           # From prompt_template
