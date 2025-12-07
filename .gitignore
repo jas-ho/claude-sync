@@ -9,6 +9,7 @@ venv/
 # Environment
 .env
 .env.local
+.claude-sync.env
 
 # IDE
 .idea/
