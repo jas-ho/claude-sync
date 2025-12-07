@@ -13,12 +13,14 @@ and organizes them into a local directory structure for Claude Code integration.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import http.cookiejar
 import json
 import logging
 import os
 import re
+import shutil
 import sys
 import unicodedata
 from dataclasses import dataclass
@@ -69,6 +71,7 @@ class Config:
     full_sync: bool = False  # Force full sync, ignore cached state
     auto_commit: bool = True  # Auto git-init and commit after sync
     project_filter: str | None = None  # Filter to single project (UUID or name substring)
+    min_disk_mb: int = 100  # Minimum required disk space in MB
 
 
 def get_config_from_env() -> dict:
@@ -636,6 +639,40 @@ def make_project_slug(name: str, uuid: str) -> str:
         slug = slug[:50].rstrip("-")
 
     return f"{slug}-{short_uuid}"
+
+
+def backup_file(file_path: Path, backup_dir: Path, max_backups: int = 5) -> Path | None:
+    """Create timestamped backup of file if it exists.
+
+    Args:
+        file_path: File to backup
+        backup_dir: Directory for backups
+        max_backups: Maximum backups to keep per file (oldest deleted)
+
+    Returns:
+        Path to backup if created, None if file didn't exist
+    """
+    from datetime import datetime
+
+    if not file_path.exists():
+        return None
+
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    backup_path = backup_dir / f'{file_path.name}.{timestamp}.bak'
+
+    shutil.copy2(file_path, backup_path)
+    log.debug(f'Backed up: {file_path.name} -> {backup_path.name}')
+
+    # Rotate old backups
+    pattern = f'{file_path.name}.*.bak'
+    existing = sorted(backup_dir.glob(pattern), key=lambda p: p.stat().st_mtime)
+    while len(existing) > max_backups:
+        oldest = existing.pop(0)
+        oldest.unlink()
+        log.debug(f'Removed old backup: {oldest.name}')
+
+    return backup_path
 
 
 # =============================================================================
@@ -1215,6 +1252,38 @@ def git_auto_commit(output_dir: Path, message: str | None = None) -> bool:
 
 
 # =============================================================================
+# Disk Space Check
+# =============================================================================
+
+
+def check_disk_space(output_dir: Path, min_mb: int = 100) -> None:
+    """Check if enough disk space is available.
+
+    Args:
+        output_dir: Directory to check
+        min_mb: Minimum required free space in MB
+
+    Raises:
+        RuntimeError: If insufficient disk space
+    """
+    import shutil
+
+    # Ensure directory exists for disk_usage
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    usage = shutil.disk_usage(output_dir)
+    free_mb = usage.free // (1024 * 1024)
+
+    if free_mb < min_mb:
+        raise RuntimeError(
+            f"Insufficient disk space: {free_mb}MB available, {min_mb}MB required. "
+            f"Free up space or use a different output directory with -o."
+        )
+
+    log.debug(f"Disk space check passed: {free_mb}MB available")
+
+
+# =============================================================================
 # Main Entry Point
 # =============================================================================
 
@@ -1250,6 +1319,13 @@ def sync(config: Config) -> int:
         log.info("Including conversations (use --skip-conversations to disable)")
     if config.full_sync:
         log.info("Full sync mode (ignoring cached state)")
+
+    # Check disk space before starting
+    try:
+        check_disk_space(config.output_dir, config.min_disk_mb)
+    except RuntimeError as e:
+        log.error(str(e))
+        return 1
 
     synced_at = datetime.now(timezone.utc).isoformat()
 
@@ -1534,6 +1610,14 @@ Environment:
         help="Enable verbose output",
     )
 
+    parser.add_argument(
+        "--min-disk-mb",
+        type=int,
+        default=100,
+        metavar="MB",
+        help="Minimum free disk space in MB (default: 100)",
+    )
+
     args = parser.parse_args(argv)
 
     # org_uuid validation happens in main() after checking list_orgs
@@ -1548,6 +1632,7 @@ Environment:
         full_sync=args.full,
         auto_commit=not args.no_git,
         project_filter=args.project,
+        min_disk_mb=args.min_disk_mb,
     )
 
 
