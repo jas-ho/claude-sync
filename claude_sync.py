@@ -290,20 +290,53 @@ def _api_request(
                     "Wait a few minutes and try again."
                 )
 
-            # Check for server errors
+            # Check for server errors - RETRY these
             if response.status_code >= 500:
+                if attempt < retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    status_hints = {
+                        502: "Bad Gateway - Claude.ai may be updating",
+                        503: "Service Unavailable - server overloaded",
+                        504: "Gateway Timeout - request took too long",
+                    }
+                    hint = status_hints.get(response.status_code, "Server error")
+                    log.warning(f"{hint} ({response.status_code}), retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue  # Retry the loop
                 raise APIError(
-                    f"Claude.ai server error ({response.status_code}).\n"
-                    "Try again later."
+                    f"Claude.ai server error ({response.status_code}) after {retries} attempts.\n"
+                    "The service may be experiencing issues. Try again later."
                 )
 
             # Check for other errors
             response.raise_for_status()
 
+            # Validate content type
+            content_type = response.headers.get('content-type', '')
+            if 'application/json' not in content_type:
+                body_preview = response.text[:500]
+                if '<html' in body_preview.lower() or '<!doctype' in body_preview.lower():
+                    raise APIError(
+                        "API returned HTML instead of JSON.\n"
+                        "This usually means Cloudflare blocked the request.\n"
+                        "Try again in a few minutes, or verify claude.ai is accessible in your browser."
+                    )
+                raise APIError(f"Unexpected content-type: {content_type}")
+
+            # Check for empty response
+            if not response.text.strip():
+                raise APIError("Empty response from API")
+
+            # Parse JSON with better error handling
+            try:
+                data = response.json()
+            except json.JSONDecodeError as e:
+                raise APIError(f"Invalid JSON in API response: {e}") from e
+
             # Add delay between requests to be nice
             time.sleep(REQUEST_DELAY)
 
-            return response.json()
+            return data
 
         except (SessionExpiredError, FileNotFoundError, APIError):
             raise
