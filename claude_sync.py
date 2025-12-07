@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["requests<3", "tqdm", "browser-cookie3"]
+# dependencies = ["curl_cffi", "tqdm", "browser-cookie3"]
 # ///
 """
 claude-sync: Sync Claude web app projects to local storage.
@@ -13,6 +13,7 @@ and organizes them into a local directory structure for Claude Code integration.
 from __future__ import annotations
 
 import argparse
+import http.cookiejar
 import json
 import logging
 import os
@@ -22,7 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import requests
+    from curl_cffi import requests
 
 # Constants
 DEFAULT_OUTPUT_DIR = Path.home() / ".claude" / "synced-projects"
@@ -88,14 +89,14 @@ class CookieExtractionError(Exception):
     pass
 
 
-def get_session_cookies(browser: str) -> dict[str, str]:
+def get_session_cookies(browser: str) -> "http.cookiejar.CookieJar":
     """Extract session cookies from browser.
 
     Args:
         browser: Browser to extract from ('edge' or 'chrome')
 
     Returns:
-        Dict with 'sessionKey' and optionally 'cf_clearance'
+        CookieJar with session cookies
 
     Raises:
         CookieExtractionError: If cookie extraction fails
@@ -104,7 +105,6 @@ def get_session_cookies(browser: str) -> dict[str, str]:
 
     domain = "claude.ai"
     required_cookies = {"sessionKey"}
-    optional_cookies = {"cf_clearance"}
 
     try:
         if browser == "edge":
@@ -135,15 +135,11 @@ def get_session_cookies(browser: str) -> dict[str, str]:
             f"Failed to extract cookies from {browser}: {e}"
         ) from e
 
-    # Extract cookies by name
-    cookies = {}
-    for cookie in cj:
-        if cookie.name in required_cookies | optional_cookies:
-            cookies[cookie.name] = cookie.value
-            log.debug(f"Found cookie: {cookie.name}")
-
     # Check for required cookies
-    missing = required_cookies - set(cookies.keys())
+    cookie_names = {cookie.name for cookie in cj}
+    log.debug(f"Found cookies: {cookie_names}")
+
+    missing = required_cookies - cookie_names
     if missing:
         raise CookieExtractionError(
             f"Missing required cookie(s): {missing}\n"
@@ -152,15 +148,15 @@ def get_session_cookies(browser: str) -> dict[str, str]:
         )
 
     # Check if session might be expired (sessionKey exists but is short/invalid format)
-    session_key = cookies.get("sessionKey", "")
-    if len(session_key) < 20:
-        raise CookieExtractionError(
-            "Session key appears invalid (too short).\n"
-            "Please log into claude.ai in your browser and retry."
-        )
+    for cookie in cj:
+        if cookie.name == "sessionKey" and len(cookie.value) < 20:
+            raise CookieExtractionError(
+                "Session key appears invalid (too short).\n"
+                "Please log into claude.ai in your browser and retry."
+            )
 
-    log.info(f"Extracted {len(cookies)} cookie(s) from {browser}")
-    return cookies
+    log.info(f"Extracted {len(cookie_names)} cookie(s) from {browser}")
+    return cj
 
 
 # =============================================================================
@@ -168,17 +164,143 @@ def get_session_cookies(browser: str) -> dict[str, str]:
 # =============================================================================
 
 
-def create_session(cookies: dict[str, str]) -> "requests.Session":
+class APIError(Exception):
+    """Raised when API request fails."""
+
+    pass
+
+
+class SessionExpiredError(APIError):
+    """Raised when session has expired."""
+
+    pass
+
+
+# Realistic browser headers
+API_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://claude.ai/",
+    "Origin": "https://claude.ai",
+}
+
+REQUEST_TIMEOUT = 30  # seconds
+REQUEST_DELAY = 0.2  # seconds between requests
+
+
+def create_session(cookie_jar: "http.cookiejar.CookieJar") -> "requests.Session":
     """Create authenticated requests session.
 
     Args:
-        cookies: Dict containing session cookies
+        cookie_jar: CookieJar with session cookies
 
     Returns:
-        Configured requests.Session
+        Configured curl_cffi Session with browser impersonation
     """
-    # TODO: Implement in task 8co.5
-    raise NotImplementedError("API client not yet implemented")
+    from curl_cffi import requests
+
+    # Convert cookie jar to dict for curl_cffi
+    cookies = {c.name: c.value for c in cookie_jar}
+
+    # Create session with Chrome impersonation to bypass Cloudflare
+    session = requests.Session(impersonate="chrome")
+    session.headers.update(API_HEADERS)
+    session.cookies.update(cookies)
+
+    return session
+
+
+def _api_request(
+    session: "requests.Session",
+    url: str,
+    retries: int = 3,
+) -> dict | list:
+    """Make API request with error handling and retries.
+
+    Args:
+        session: Authenticated requests session
+        url: Full URL to request
+        retries: Number of retry attempts for transient failures
+
+    Returns:
+        Parsed JSON response
+
+    Raises:
+        SessionExpiredError: If session is invalid/expired
+        APIError: For other API failures
+        FileNotFoundError: If resource not found (404)
+    """
+    import time
+
+    from curl_cffi import requests
+
+    last_error = None
+
+    for attempt in range(retries):
+        try:
+            log.debug(f"GET {url} (attempt {attempt + 1}/{retries})")
+            response = session.get(url, timeout=REQUEST_TIMEOUT)
+
+            # Check for auth errors
+            if response.status_code in (401, 403):
+                raise SessionExpiredError(
+                    "Session expired or invalid.\n"
+                    "Please log into claude.ai in your browser and retry."
+                )
+
+            # Check for not found
+            if response.status_code == 404:
+                raise FileNotFoundError(f"Resource not found: {url}")
+
+            # Check for rate limiting
+            if response.status_code == 429:
+                raise APIError(
+                    "Rate limited by Claude.ai.\n"
+                    "Wait a few minutes and try again."
+                )
+
+            # Check for server errors
+            if response.status_code >= 500:
+                raise APIError(
+                    f"Claude.ai server error ({response.status_code}).\n"
+                    "Try again later."
+                )
+
+            # Check for other errors
+            response.raise_for_status()
+
+            # Add delay between requests to be nice
+            time.sleep(REQUEST_DELAY)
+
+            return response.json()
+
+        except requests.errors.Timeout:
+            last_error = APIError(
+                "Request timed out.\n"
+                "Check your internet connection and try again."
+            )
+            if attempt < retries - 1:
+                log.warning("Timeout, retrying in 1s...")
+                time.sleep(1)
+        except (OSError, ConnectionError) as e:
+            last_error = APIError(f"Connection error: {e}")
+            if attempt < retries - 1:
+                log.warning("Connection error, retrying in 1s...")
+                time.sleep(1)
+        except (SessionExpiredError, FileNotFoundError, APIError):
+            raise
+        except requests.errors.RequestsError as e:
+            raise APIError(f"Request failed: {e}") from e
+
+    # All retries exhausted
+    if last_error:
+        raise last_error
+    raise APIError("Request failed after all retries")
 
 
 def fetch_projects(session: "requests.Session", org_uuid: str) -> list[dict]:
@@ -189,10 +311,16 @@ def fetch_projects(session: "requests.Session", org_uuid: str) -> list[dict]:
         org_uuid: Organization UUID
 
     Returns:
-        List of project dicts
+        List of project dicts with full metadata
     """
-    # TODO: Implement in task 8co.5
-    raise NotImplementedError("API client not yet implemented")
+    url = f"{API_BASE}/{org_uuid}/projects"
+    projects = _api_request(session, url)
+
+    if not isinstance(projects, list):
+        raise APIError(f"Unexpected response format: expected list, got {type(projects)}")
+
+    log.debug(f"Fetched {len(projects)} projects")
+    return projects
 
 
 def fetch_project_docs(
@@ -206,10 +334,64 @@ def fetch_project_docs(
         project_uuid: Project UUID
 
     Returns:
-        List of document dicts
+        List of document dicts with content
     """
-    # TODO: Implement in task 8co.5
-    raise NotImplementedError("API client not yet implemented")
+    url = f"{API_BASE}/{org_uuid}/projects/{project_uuid}/docs"
+    params = "?tree=true"
+    docs = _api_request(session, url + params)
+
+    if not isinstance(docs, list):
+        raise APIError(f"Unexpected response format: expected list, got {type(docs)}")
+
+    log.debug(f"Fetched {len(docs)} docs for project {project_uuid}")
+    return docs
+
+
+def fetch_project_conversations(
+    session: "requests.Session", org_uuid: str, project_uuid: str
+) -> list[dict]:
+    """Fetch conversation list for a project.
+
+    Args:
+        session: Authenticated requests session
+        org_uuid: Organization UUID
+        project_uuid: Project UUID
+
+    Returns:
+        List of conversation metadata dicts
+    """
+    url = f"{API_BASE}/{org_uuid}/projects/{project_uuid}/conversations"
+    params = "?tree=true"
+    convos = _api_request(session, url + params)
+
+    if not isinstance(convos, list):
+        raise APIError(f"Unexpected response format: expected list, got {type(convos)}")
+
+    log.debug(f"Fetched {len(convos)} conversations for project {project_uuid}")
+    return convos
+
+
+def fetch_conversation(
+    session: "requests.Session", org_uuid: str, conversation_uuid: str
+) -> dict:
+    """Fetch full conversation with messages.
+
+    Args:
+        session: Authenticated requests session
+        org_uuid: Organization UUID
+        conversation_uuid: Conversation UUID
+
+    Returns:
+        Conversation dict with chat_messages
+    """
+    url = f"{API_BASE}/{org_uuid}/chat_conversations/{conversation_uuid}"
+    params = "?rendering_mode=messages&render_all_tools=true"
+    convo = _api_request(session, url + params)
+
+    if not isinstance(convo, dict):
+        raise APIError(f"Unexpected response format: expected dict, got {type(convo)}")
+
+    return convo
 
 
 # =============================================================================
@@ -324,6 +506,12 @@ def sync(config: Config) -> int:
 
     except CookieExtractionError as e:
         log.error(f"Cookie extraction failed:\n{e}")
+        return 1
+    except SessionExpiredError as e:
+        log.error(f"Session error:\n{e}")
+        return 1
+    except APIError as e:
+        log.error(f"API error:\n{e}")
         return 1
     except NotImplementedError as e:
         log.error(f"Feature not implemented: {e}")
