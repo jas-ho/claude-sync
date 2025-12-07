@@ -49,7 +49,7 @@ class Config:
     org_uuid: str | None
     output_dir: Path
     browser: str
-    include_conversations: bool = False
+    skip_conversations: bool = False  # Default: sync conversations
     verbose: bool = False
     list_orgs: bool = False
     full_sync: bool = False  # Force full sync, ignore cached state
@@ -676,7 +676,11 @@ _No project instructions defined._
 
 
 def write_index(
-    projects: list[dict], output_dir: Path, org_uuid: str, synced_at: str
+    projects: list[dict],
+    output_dir: Path,
+    org_uuid: str,
+    synced_at: str,
+    orphaned_projects: list[dict] | None = None,
 ) -> None:
     """Write index.json manifest file.
 
@@ -685,6 +689,7 @@ def write_index(
         output_dir: Base output directory
         org_uuid: Organization UUID
         synced_at: ISO timestamp of sync
+        orphaned_projects: List of projects deleted remotely but kept locally
     """
     index = {
         "synced_at": synced_at,
@@ -704,6 +709,21 @@ def write_index(
             "updated_at": project.get("updated_at"),
             "docs_count": project.get("_docs_count", 0),
         }
+
+    # Add orphaned projects (deleted remotely, kept locally)
+    if orphaned_projects:
+        for orphan in orphaned_projects:
+            orphan_uuid = orphan["uuid"]
+            orphan_name = orphan.get("name", "Unknown")
+            orphan_slug = make_project_slug(orphan_name, orphan_uuid)
+
+            index["projects"][orphan_uuid] = {
+                "name": orphan_name,
+                "slug": orphan_slug,
+                "path": f"{orphan_slug}/",
+                "orphaned": True,
+                "orphaned_at": orphan.get("_orphaned_at"),
+            }
 
     index_path = output_dir / "index.json"
     index_path.write_text(json.dumps(index, indent=2), encoding="utf-8")
@@ -804,6 +824,21 @@ def project_needs_sync(
     return False, "unchanged"
 
 
+def detect_deleted_projects(prev_state: dict, current_projects: list[dict]) -> list[str]:
+    """Detect projects that were deleted remotely.
+
+    Args:
+        prev_state: Previous sync state
+        current_projects: Current projects from API
+
+    Returns:
+        List of deleted project UUIDs
+    """
+    current_uuids = {p["uuid"] for p in current_projects}
+    prev_uuids = set(prev_state.get("projects", {}).keys())
+    return list(prev_uuids - current_uuids)
+
+
 def build_project_state(project: dict, docs: list[dict]) -> dict:
     """Build sync state entry for a project."""
     doc_states = {}
@@ -815,16 +850,74 @@ def build_project_state(project: dict, docs: list[dict]) -> dict:
                 "filename": doc.get("file_name") or doc.get("filename", ""),
             }
 
-    return {
+    state = {
         "updated_at": project.get("updated_at", ""),
         "prompt_template_hash": compute_doc_hash(project.get("prompt_template", "")),
         "docs": doc_states,
     }
 
+    # Include conversation state if present
+    if "_conversations" in project:
+        state["conversations"] = project["_conversations"]
+
+    return state
+
 
 # =============================================================================
 # Conversation Output (Task 8co.11)
 # =============================================================================
+
+
+def conversation_needs_sync(
+    convo_meta: dict, prev_convos: dict, force_full: bool = False
+) -> tuple[bool, str]:
+    """Check if a conversation needs to be synced.
+
+    Args:
+        convo_meta: Conversation metadata from API (has updated_at)
+        prev_convos: Previous conversation state dict
+        force_full: Force sync even if unchanged
+
+    Returns:
+        Tuple of (needs_sync: bool, reason: str)
+    """
+    if force_full:
+        return True, "full sync"
+
+    convo_uuid = convo_meta.get("uuid", "")
+    prev_convo = prev_convos.get(convo_uuid)
+
+    if not prev_convo:
+        return True, "new"
+
+    current_updated = convo_meta.get("updated_at", "")
+    prev_updated = prev_convo.get("updated_at", "")
+
+    if current_updated != prev_updated:
+        return True, "updated"
+
+    return False, "unchanged"
+
+
+def write_conversation_index(project_dir: Path, convo_index: dict, synced_at: str) -> None:
+    """Write conversations/index.json manifest.
+
+    Args:
+        project_dir: Project directory path
+        convo_index: Dict mapping convo UUID to metadata
+        synced_at: ISO timestamp of sync
+    """
+    convos_dir = project_dir / "conversations"
+    convos_dir.mkdir(exist_ok=True)
+
+    index = {
+        "synced_at": synced_at,
+        "conversations": convo_index,
+    }
+
+    index_path = convos_dir / "index.json"
+    index_path.write_text(json.dumps(index, indent=2), encoding="utf-8")
+    log.debug(f"Wrote {index_path}")
 
 
 def write_conversation_output(
@@ -1020,8 +1113,8 @@ def sync(config: Config) -> int:
     log.info(f"Syncing organization {org_uuid}")
     log.info(f"Output directory: {config.output_dir}")
     log.info(f"Browser: {config.browser}")
-    if config.include_conversations:
-        log.info("Including conversations")
+    if not config.skip_conversations:
+        log.info("Including conversations (use --skip-conversations to disable)")
     if config.full_sync:
         log.info("Full sync mode (ignoring cached state)")
 
@@ -1069,20 +1162,63 @@ def sync(config: Config) -> int:
                 log.debug(f"Syncing {project_name}: {reason}")
                 project_dir = write_project_output(full_project, docs, config.output_dir)
 
-                # Sync conversations if requested
-                if config.include_conversations:
+                # Sync conversations (default on, skip with --skip-conversations)
+                if not config.skip_conversations:
                     convo_list = fetch_project_conversations(session, org_uuid, project_uuid)
                     if convo_list:
-                        log.debug(f"Fetching {len(convo_list)} conversations...")
+                        # Get previous conversation state for incremental sync
+                        prev_project_state = prev_state.get("projects", {}).get(project_uuid, {})
+                        prev_convos = prev_project_state.get("conversations", {})
+
+                        convos_synced = 0
+                        convos_skipped = 0
                         used_convo_filenames: set[str] = set()
+                        convo_index: dict[str, dict] = {}
+
                         for convo_meta in convo_list:
                             convo_uuid = convo_meta.get("uuid")
-                            if convo_uuid:
+                            if not convo_uuid:
+                                continue
+
+                            # Check if conversation needs sync (incremental)
+                            convo_needs_sync, convo_reason = conversation_needs_sync(
+                                convo_meta, prev_convos, config.full_sync
+                            )
+
+                            if convo_needs_sync:
                                 try:
                                     full_convo = fetch_conversation(session, org_uuid, convo_uuid)
-                                    write_conversation_output(full_convo, project_dir, used_convo_filenames)
+                                    filename = write_conversation_output(
+                                        full_convo, project_dir, used_convo_filenames
+                                    )
+                                    if filename:
+                                        convo_index[convo_uuid] = {
+                                            "name": convo_meta.get("name", "Untitled"),
+                                            "filename": filename,
+                                            "created_at": convo_meta.get("created_at"),
+                                            "updated_at": convo_meta.get("updated_at"),
+                                            "message_count": len(full_convo.get("chat_messages", [])),
+                                        }
+                                        convos_synced += 1
                                 except (APIError, FileNotFoundError) as e:
                                     log.warning(f"Failed to fetch conversation {convo_uuid}: {e}")
+                            else:
+                                # Keep previous index entry for unchanged conversations
+                                if convo_uuid in prev_convos:
+                                    convo_index[convo_uuid] = prev_convos[convo_uuid]
+                                convos_skipped += 1
+
+                        # Write conversation index
+                        if convo_index:
+                            write_conversation_index(project_dir, convo_index, synced_at)
+
+                        if convos_skipped > 0:
+                            log.debug(f"Conversations: {convos_synced} synced, {convos_skipped} skipped")
+                        elif convos_synced > 0:
+                            log.debug(f"Conversations: {convos_synced} synced")
+
+                        # Store conversation state for next sync
+                        full_project["_conversations"] = convo_index
 
                 synced_count += 1
             else:
@@ -1093,8 +1229,22 @@ def sync(config: Config) -> int:
             new_state["projects"][project_uuid] = build_project_state(full_project, docs)
             synced_projects.append(full_project)
 
-        # Step 6: Write index and save sync state
-        write_index(synced_projects, config.output_dir, org_uuid, synced_at)
+        # Step 6: Detect deleted projects and mark as orphaned
+        deleted_uuids = detect_deleted_projects(prev_state, projects)
+        orphaned_projects = []
+        for deleted_uuid in deleted_uuids:
+            prev_project = prev_state.get("projects", {}).get(deleted_uuid, {})
+            # Keep the project info but mark as orphaned
+            orphaned_projects.append({
+                "uuid": deleted_uuid,
+                "name": prev_project.get("name", "Unknown"),
+                "_orphaned": True,
+                "_orphaned_at": synced_at,
+            })
+            log.warning(f"Project '{prev_project.get('name', deleted_uuid)}' deleted remotely (local files kept)")
+
+        # Step 7: Write index and save sync state
+        write_index(synced_projects, config.output_dir, org_uuid, synced_at, orphaned_projects)
         save_sync_state(config.output_dir, new_state)
 
         # Step 7: Git auto-commit
@@ -1194,10 +1344,9 @@ Environment:
     )
 
     parser.add_argument(
-        "-c",
-        "--conversations",
+        "--skip-conversations",
         action="store_true",
-        help="Also sync project conversations",
+        help="Skip syncing project conversations (faster sync)",
     )
 
     parser.add_argument(
@@ -1227,7 +1376,7 @@ Environment:
         org_uuid=args.org_uuid,
         output_dir=args.output,
         browser=args.browser,
-        include_conversations=args.conversations,
+        skip_conversations=args.skip_conversations,
         verbose=args.verbose,
         list_orgs=args.list_orgs,
         full_sync=args.full,
