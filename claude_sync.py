@@ -54,6 +54,7 @@ class Config:
     list_orgs: bool = False
     full_sync: bool = False  # Force full sync, ignore cached state
     auto_commit: bool = True  # Auto git-init and commit after sync
+    project_filter: str | None = None  # Filter to single project (UUID or name substring)
 
 
 def get_config_from_env() -> dict:
@@ -83,6 +84,26 @@ def get_config_from_env() -> dict:
         config["CLAUDE_ORG_UUID"] = org
 
     return config
+
+
+def sanitize_sensitive_data(text: str) -> str:
+    """Remove potential credentials from text for safe logging.
+
+    Redacts:
+    - Session keys and tokens (long alphanumeric strings)
+    - Anything that looks like a secret
+    """
+    import re
+    # Redact sessionKey specifically
+    text = re.sub(
+        r'(sessionKey["\']?\s*[:=]\s*["\']?)[a-zA-Z0-9_-]{20,}',
+        r'\1[REDACTED]',
+        text,
+        flags=re.IGNORECASE
+    )
+    # Redact any very long alphanumeric strings (likely tokens)
+    text = re.sub(r'\b[a-zA-Z0-9_-]{50,}\b', '[REDACTED-TOKEN]', text)
+    return text
 
 
 # =============================================================================
@@ -128,7 +149,7 @@ def get_session_cookies(browser: str) -> "http.cookiejar.CookieJar":
             f"Try closing {browser} completely and retry.\n"
             f"On macOS, you may need to grant Terminal/IDE access in "
             f"System Preferences > Security & Privacy > Privacy > Full Disk Access.\n"
-            f"Original error: {e}"
+            f"Original error: {sanitize_sensitive_data(str(e))}"
         ) from e
     except Exception as e:
         # browser-cookie3 can raise various exceptions
@@ -139,7 +160,7 @@ def get_session_cookies(browser: str) -> "http.cookiejar.CookieJar":
                 f"Close {browser} completely and retry."
             ) from e
         raise CookieExtractionError(
-            f"Failed to extract cookies from {browser}: {e}"
+            f"Failed to extract cookies from {browser}: {sanitize_sensitive_data(str(e))}"
         ) from e
 
     # Check for required cookies
@@ -851,6 +872,7 @@ def build_project_state(project: dict, docs: list[dict]) -> dict:
             }
 
     state = {
+        "name": project.get("name", "Unknown"),
         "updated_at": project.get("updated_at", ""),
         "prompt_template_hash": compute_doc_hash(project.get("prompt_template", "")),
         "docs": doc_states,
@@ -1133,6 +1155,26 @@ def sync(config: Config) -> int:
         projects = fetch_projects(session, org_uuid)
         log.info(f"Found {len(projects)} projects")
 
+        # Step 3b: Filter to single project if requested
+        if config.project_filter:
+            filter_str = config.project_filter.lower()
+            filtered = [
+                p for p in projects
+                if filter_str in p["uuid"].lower() or filter_str in p.get("name", "").lower()
+            ]
+            if not filtered:
+                log.error(f"No project matches filter '{config.project_filter}'")
+                log.info("Available projects:")
+                for p in projects:
+                    log.info(f"  {p['uuid'][:8]}  {p.get('name', 'Unknown')}")
+                return 1
+            if len(filtered) > 1:
+                log.warning(f"Filter '{config.project_filter}' matched {len(filtered)} projects:")
+                for p in filtered:
+                    log.warning(f"  {p['uuid'][:8]}  {p.get('name', 'Unknown')}")
+            projects = filtered
+            log.info(f"Filtered to {len(projects)} project(s)")
+
         # Step 4: Load previous sync state (for incremental sync)
         config.output_dir.mkdir(parents=True, exist_ok=True)
         prev_state = {} if config.full_sync else load_sync_state(config.output_dir)
@@ -1276,7 +1318,8 @@ def sync(config: Config) -> int:
         if config.verbose:
             import traceback
 
-            traceback.print_exc()
+            tb = traceback.format_exc()
+            log.error(sanitize_sensitive_data(tb))
         return 1
 
 
@@ -1350,6 +1393,14 @@ Environment:
     )
 
     parser.add_argument(
+        "-p",
+        "--project",
+        type=str,
+        default=None,
+        help="Sync only this project (UUID or name substring match)",
+    )
+
+    parser.add_argument(
         "--full",
         action="store_true",
         help="Force full sync, ignore cached state",
@@ -1381,6 +1432,7 @@ Environment:
         list_orgs=args.list_orgs,
         full_sync=args.full,
         auto_commit=not args.no_git,
+        project_filter=args.project,
     )
 
 
