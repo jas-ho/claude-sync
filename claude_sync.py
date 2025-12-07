@@ -82,6 +82,12 @@ def get_config_from_env() -> dict:
 # =============================================================================
 
 
+class CookieExtractionError(Exception):
+    """Raised when cookie extraction fails."""
+
+    pass
+
+
 def get_session_cookies(browser: str) -> dict[str, str]:
     """Extract session cookies from browser.
 
@@ -92,10 +98,69 @@ def get_session_cookies(browser: str) -> dict[str, str]:
         Dict with 'sessionKey' and optionally 'cf_clearance'
 
     Raises:
-        RuntimeError: If cookie extraction fails
+        CookieExtractionError: If cookie extraction fails
     """
-    # TODO: Implement in task 8co.4
-    raise NotImplementedError("Cookie extraction not yet implemented")
+    import browser_cookie3
+
+    domain = "claude.ai"
+    required_cookies = {"sessionKey"}
+    optional_cookies = {"cf_clearance"}
+
+    try:
+        if browser == "edge":
+            log.debug("Extracting cookies from Microsoft Edge...")
+            cj = browser_cookie3.edge(domain_name=domain)
+        elif browser == "chrome":
+            log.debug("Extracting cookies from Google Chrome...")
+            cj = browser_cookie3.chrome(domain_name=domain)
+        else:
+            raise CookieExtractionError(f"Unsupported browser: {browser}")
+    except PermissionError as e:
+        raise CookieExtractionError(
+            f"Permission denied accessing {browser} cookies.\n"
+            f"Try closing {browser} completely and retry.\n"
+            f"On macOS, you may need to grant Terminal/IDE access in "
+            f"System Preferences > Security & Privacy > Privacy > Full Disk Access.\n"
+            f"Original error: {e}"
+        ) from e
+    except Exception as e:
+        # browser-cookie3 can raise various exceptions
+        error_str = str(e).lower()
+        if "locked" in error_str or "database" in error_str:
+            raise CookieExtractionError(
+                f"Browser cookie database is locked.\n"
+                f"Close {browser} completely and retry."
+            ) from e
+        raise CookieExtractionError(
+            f"Failed to extract cookies from {browser}: {e}"
+        ) from e
+
+    # Extract cookies by name
+    cookies = {}
+    for cookie in cj:
+        if cookie.name in required_cookies | optional_cookies:
+            cookies[cookie.name] = cookie.value
+            log.debug(f"Found cookie: {cookie.name}")
+
+    # Check for required cookies
+    missing = required_cookies - set(cookies.keys())
+    if missing:
+        raise CookieExtractionError(
+            f"Missing required cookie(s): {missing}\n"
+            f"Please log into claude.ai in {browser} and retry.\n"
+            f"If you recently logged in, try refreshing the page first."
+        )
+
+    # Check if session might be expired (sessionKey exists but is short/invalid format)
+    session_key = cookies.get("sessionKey", "")
+    if len(session_key) < 20:
+        raise CookieExtractionError(
+            "Session key appears invalid (too short).\n"
+            "Please log into claude.ai in your browser and retry."
+        )
+
+    log.info(f"Extracted {len(cookies)} cookie(s) from {browser}")
+    return cookies
 
 
 # =============================================================================
@@ -257,6 +322,9 @@ def sync(config: Config) -> int:
         log.info("Sync complete!")
         return 0
 
+    except CookieExtractionError as e:
+        log.error(f"Cookie extraction failed:\n{e}")
+        return 1
     except NotImplementedError as e:
         log.error(f"Feature not implemented: {e}")
         return 1
