@@ -753,6 +753,9 @@ source: claude.ai/project/{project_uuid}
 _No project instructions defined._
 """
 
+    # Backup before writing
+    backup_dir = output_dir / ".backup" / project_slug
+    backup_file(claude_md_path, backup_dir)
     claude_md_path.write_text(claude_md_content, encoding="utf-8")
     log.debug(f"Wrote {claude_md_path}")
 
@@ -767,6 +770,7 @@ _No project instructions defined._
         "synced_at": synced_at,
     }
     meta_path = project_dir / "meta.json"
+    backup_file(meta_path, backup_dir)
     meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
     log.debug(f"Wrote {meta_path}")
 
@@ -791,6 +795,7 @@ _No project instructions defined._
             # Write doc content
             doc_content = doc.get("content", "")
             doc_path = docs_dir / unique_filename
+            backup_file(doc_path, backup_dir)
             doc_path.write_text(doc_content, encoding="utf-8")
             log.debug(f"Wrote {doc_path}")
 
