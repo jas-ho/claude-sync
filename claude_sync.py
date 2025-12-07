@@ -1917,8 +1917,99 @@ def sync(config: Config) -> int:
             metrics['orphaned_projects'] += 1
             log.warning(f"Project '{prev_project.get('name', deleted_uuid)}' deleted remotely (local files kept)")
 
+        # Step 6.5: Sync standalone conversations if requested
+        standalone_conversation_count = 0
+        if config.include_standalone:
+            log.info("Syncing standalone conversations...")
+            try:
+                # Get all project UUIDs to filter them out
+                project_uuids = {p["uuid"] for p in projects}
+
+                # Fetch standalone conversations
+                standalone_convos = fetch_standalone_conversations(session, org_uuid, project_uuids)
+                log.info(f"Found {len(standalone_convos)} standalone conversations")
+
+                # Get previous standalone state
+                prev_standalone = prev_state.get("standalone_conversations", {})
+
+                # Track synced conversations
+                standalone_index: dict[str, dict] = {}
+                used_standalone_filenames: set[str] = set()
+
+                for convo_meta in standalone_convos:
+                    if _interrupted:
+                        log.info("Stopping standalone sync early due to interrupt")
+                        break
+
+                    convo_uuid = convo_meta.get("uuid")
+                    if not convo_uuid:
+                        continue
+
+                    # Check if conversation needs sync
+                    needs_sync, reason = conversation_needs_sync(
+                        convo_meta, prev_standalone, config.full_sync
+                    )
+
+                    if needs_sync:
+                        try:
+                            # Fetch full conversation
+                            full_convo = fetch_conversation(session, org_uuid, convo_uuid)
+
+                            # Check conversation size
+                            message_count = len(full_convo.get("chat_messages", []))
+                            if message_count > MAX_CONVERSATION_MESSAGES:
+                                log.warning(f"Skipping standalone conversation '{convo_meta.get('name')}': {message_count} messages exceeds {MAX_CONVERSATION_MESSAGES} limit")
+                                metrics['standalone_skipped'] += 1
+                                continue
+
+                            # Write conversation
+                            filename = write_standalone_conversation(
+                                full_convo, config.output_dir, used_standalone_filenames, prev_standalone
+                            )
+                            if filename:
+                                standalone_index[convo_uuid] = {
+                                    "filename": filename,
+                                    "updated_at": convo_meta.get("updated_at"),
+                                }
+                                metrics['standalone_synced'] += 1
+                        except (APIError, FileNotFoundError) as e:
+                            log.warning(f"Failed to fetch standalone conversation {convo_uuid}: {e}")
+                            metrics['standalone_skipped'] += 1
+                    else:
+                        # Keep previous index entry for unchanged conversations
+                        if convo_uuid in prev_standalone:
+                            standalone_index[convo_uuid] = prev_standalone[convo_uuid]
+                        metrics['standalone_skipped'] += 1
+
+                # Detect deleted standalone conversations
+                current_standalone_uuids = {c.get("uuid") for c in standalone_convos}
+                standalone_dir = config.output_dir / "_standalone"
+                for prev_uuid, prev_data in prev_standalone.items():
+                    if prev_uuid not in current_standalone_uuids:
+                        # Conversation was deleted remotely
+                        prev_filename = prev_data.get("filename", "")
+                        if prev_filename:
+                            old_file = standalone_dir / prev_filename
+                            if old_file.exists():
+                                old_file.unlink()
+                                log.info(f"Deleted orphaned standalone conversation: {prev_filename}")
+
+                # Store standalone state for next sync
+                new_state["standalone_conversations"] = standalone_index
+                standalone_conversation_count = len(standalone_index)
+
+                if metrics['standalone_synced'] > 0 or metrics['standalone_skipped'] > 0:
+                    log.info(f"Standalone conversations: {metrics['standalone_synced']} synced, {metrics['standalone_skipped']} skipped")
+
+            except Exception as e:
+                log.error(f"Failed to sync standalone conversations: {e}")
+                if config.verbose:
+                    import traceback
+                    tb = traceback.format_exc()
+                    log.error(sanitize_sensitive_data(tb))
+
         # Step 7: Write index and save sync state
-        write_index(synced_projects, config.output_dir, org_uuid, synced_at, orphaned_projects)
+        write_index(synced_projects, config.output_dir, org_uuid, synced_at, orphaned_projects, standalone_conversation_count)
         save_sync_state(config.output_dir, new_state)
 
         # Step 7: Git auto-commit
@@ -1931,6 +2022,8 @@ def sync(config: Config) -> int:
         print(f"  Projects: {metrics['projects_checked']} checked, {metrics['projects_synced']} synced, {metrics['projects_skipped']} skipped")
         if not config.skip_conversations:
             print(f"  Conversations: {metrics['conversations_synced']} synced, {metrics['conversations_skipped']} skipped")
+        if config.include_standalone and (metrics['standalone_synced'] > 0 or metrics['standalone_skipped'] > 0):
+            print(f"  Standalone: {metrics['standalone_synced']} synced, {metrics['standalone_skipped']} skipped")
         if metrics['orphaned_projects'] > 0:
             print(f"  Orphaned: {metrics['orphaned_projects']} project(s) deleted remotely")
         print(f"  Output: {config.output_dir}")
