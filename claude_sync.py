@@ -115,7 +115,7 @@ def acquire_lock(output_dir: Path) -> int:
             with open(lock_path) as f:
                 pid = f.read().strip()
             raise RuntimeError(f"Another sync is running (PID: {pid})")
-        except:
+        except Exception:
             raise RuntimeError("Another sync is running")
 
     # Write our PID
@@ -130,7 +130,7 @@ def release_lock(fd: int) -> None:
     try:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
-    except:
+    except Exception:
         pass  # Best effort
 
 
@@ -868,7 +868,7 @@ def atomic_write_json(path: Path, data: dict) -> None:
 
         # Atomic rename (POSIX guarantees atomicity)
         tmp.replace(path)
-    except:
+    except Exception:
         # Clean up temp file on error
         tmp.unlink(missing_ok=True)
         raise
