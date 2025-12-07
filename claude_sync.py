@@ -13,11 +13,14 @@ and organizes them into a local directory structure for Claude Code integration.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.cookiejar
 import json
 import logging
 import os
+import re
 import sys
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -237,8 +240,6 @@ def _api_request(
     """
     import time
 
-    from curl_cffi import requests
-
     last_error = None
 
     for attempt in range(retries):
@@ -279,22 +280,21 @@ def _api_request(
 
             return response.json()
 
-        except requests.errors.Timeout:
-            last_error = APIError(
-                "Request timed out.\n"
-                "Check your internet connection and try again."
-            )
-            if attempt < retries - 1:
-                log.warning("Timeout, retrying in 1s...")
-                time.sleep(1)
-        except (OSError, ConnectionError) as e:
-            last_error = APIError(f"Connection error: {e}")
-            if attempt < retries - 1:
-                log.warning("Connection error, retrying in 1s...")
-                time.sleep(1)
         except (SessionExpiredError, FileNotFoundError, APIError):
             raise
-        except requests.errors.RequestsError as e:
+        except (OSError, ConnectionError, TimeoutError) as e:
+            error_str = str(e).lower()
+            if "timeout" in error_str:
+                last_error = APIError(
+                    "Request timed out.\n"
+                    "Check your internet connection and try again."
+                )
+            else:
+                last_error = APIError(f"Connection error: {e}")
+            if attempt < retries - 1:
+                log.warning(f"Network error, retrying in 1s... ({e})")
+                time.sleep(1)
+        except Exception as e:
             raise APIError(f"Request failed: {e}") from e
 
     # All retries exhausted
@@ -398,24 +398,125 @@ def fetch_conversation(
 # Filename Sanitization (Task 8co.6)
 # =============================================================================
 
+# Characters invalid on Windows and/or Unix
+INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
-def sanitize_filename(name: str) -> str:
+# Windows reserved device names
+WINDOWS_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL"} | {
+    f"{prefix}{i}" for prefix in ["COM", "LPT"] for i in range(1, 10)
+}
+
+
+def sanitize_filename(name: str, max_len: int = 200) -> str:
     """Convert string to valid cross-platform filename.
 
     Handles:
     - Invalid characters: <>:"/\\|?*
     - Windows reserved names (CON, PRN, etc.)
     - Leading/trailing spaces and dots
-    - NULL bytes
+    - NULL bytes and control characters
+    - Unicode normalization (NFC)
+    - Length limits with hash suffix for long names
 
     Args:
         name: Original filename or title
+        max_len: Maximum filename length (default 200, leaves room for extensions)
 
     Returns:
-        Safe filename string
+        Safe filename string, never empty
     """
-    # TODO: Implement in task 8co.6
-    raise NotImplementedError("Filename sanitization not yet implemented")
+    # Normalize unicode to NFC (consistent across platforms)
+    name = unicodedata.normalize("NFC", name)
+
+    # Replace invalid characters with hyphen
+    name = INVALID_FILENAME_CHARS.sub("-", name)
+
+    # Collapse multiple hyphens
+    name = re.sub(r"-+", "-", name)
+
+    # Strip leading/trailing spaces, dots, and hyphens
+    name = name.strip(" .-")
+
+    # Handle Windows reserved names
+    stem = name.rsplit(".", 1)[0].upper()
+    if stem in WINDOWS_RESERVED_NAMES:
+        name = f"_{name}"
+
+    # Truncate with hash if too long
+    if len(name) > max_len:
+        hash_suffix = hashlib.md5(name.encode()).hexdigest()[:8]
+        name = f"{name[:max_len - 10]}_{hash_suffix}"
+
+    # Ensure non-empty
+    return name or "unnamed"
+
+
+def get_unique_filename(
+    base: str, existing: set[str], case_insensitive: bool = True
+) -> str:
+    """Get unique filename avoiding collisions.
+
+    Args:
+        base: Base filename to make unique
+        existing: Set of already-used filenames
+        case_insensitive: If True, treat 'File.md' and 'file.md' as collision
+                         (needed for macOS HFS+)
+
+    Returns:
+        Unique filename, possibly with numeric suffix
+    """
+    # Comparison function based on case sensitivity
+    def normalize(s: str) -> str:
+        return s.lower() if case_insensitive else s
+
+    existing_normalized = {normalize(f) for f in existing}
+
+    # Try base name first
+    if normalize(base) not in existing_normalized:
+        return base
+
+    # Split extension
+    if "." in base:
+        stem, ext = base.rsplit(".", 1)
+        ext = f".{ext}"
+    else:
+        stem, ext = base, ""
+
+    # Try numbered variants
+    for i in range(1, 1000):
+        candidate = f"{stem}_{i}{ext}"
+        if normalize(candidate) not in existing_normalized:
+            return candidate
+
+    # Extremely unlikely, but handle it
+    hash_suffix = hashlib.md5(base.encode()).hexdigest()[:8]
+    return f"{stem}_{hash_suffix}{ext}"
+
+
+def make_project_slug(name: str, uuid: str) -> str:
+    """Create project directory name from project name and UUID.
+
+    Args:
+        name: Project name
+        uuid: Project UUID
+
+    Returns:
+        Directory name like 'project-name-abc12345'
+    """
+    # Sanitize and lowercase the name
+    slug = sanitize_filename(name).lower()
+
+    # Replace spaces with hyphens
+    slug = re.sub(r"\s+", "-", slug)
+
+    # Take first 8 chars of UUID for uniqueness
+    short_uuid = uuid.replace("-", "")[:8]
+
+    # Combine, limit total length
+    if len(slug) > 50:
+        slug = slug[:50].rstrip("-")
+
+    return f"{slug}-{short_uuid}"
 
 
 # =============================================================================
