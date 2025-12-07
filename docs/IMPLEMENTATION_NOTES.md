@@ -1,0 +1,66 @@
+# Implementation Notes & Observations
+
+Notes collected during implementation for sanity check review.
+
+## API Findings
+
+### Cookie/Auth
+- `cf_clearance` cookie alone isn't enough - Cloudflare uses TLS fingerprinting
+- **Solution**: `curl_cffi` with `impersonate="chrome"` bypasses Cloudflare
+- Standard `requests` library and `curl` both get blocked
+
+### Endpoints
+- `/api/organizations/{org}/projects` - returns list, but **NO prompt_template**
+- `/api/organizations/{org}/projects/{pid}` - returns full details including prompt_template
+- **Gotcha**: Must fetch each project individually to get instructions
+- Doc filename key is `file_name` (with underscore), not `filename`
+
+### Bootstrap
+- `/api/bootstrap` returns user info including organization memberships
+- Works for org auto-discovery
+
+## Output Structure
+
+```
+~/.local/share/claude-sync/
+├── index.json
+└── <project-slug>-<uuid8>/
+    ├── CLAUDE.md          # prompt_template with frontmatter
+    ├── meta.json          # project metadata
+    └── docs/
+        └── *.md
+```
+
+## Edge Cases Handled
+
+### Filename Sanitization
+- Invalid chars: `<>:"/\|?*` and control chars → replaced with `-`
+- Windows reserved names (CON, PRN, etc.) → prefixed with `_`
+- Collisions after sanitization → numeric suffix `_1`, `_2`, etc.
+- Case-insensitive collision check (macOS HFS+)
+- Long names → truncated with hash suffix
+
+### Missing Data
+- No prompt_template → generates minimal CLAUDE.md with project name
+- No filename on doc → defaults to `untitled.md`
+- Missing extension → adds `.md`
+
+## Known Issues / TODOs
+
+1. **Multiple orgs with same name**: User has two "Apart Research" orgs - no way to distinguish except by UUID
+2. **No incremental sync yet**: Always re-downloads everything
+3. **Conversations not implemented**: Task 8co.11
+4. **No error recovery**: If one project fails, whole sync fails (task 8co.10)
+
+## Performance
+
+- ~18 seconds for 16 projects
+- 2 API calls per project (details + docs)
+- 0.2s delay between requests
+
+## Testing Observations
+
+- Real sync tested with user's 16 projects
+- Docs have meaningful names (not all "untitled")
+- prompt_template correctly extracted when present
+- Progress bar (tqdm) works correctly

@@ -46,11 +46,12 @@ log = logging.getLogger(__name__)
 class Config:
     """Runtime configuration for sync operation."""
 
-    org_uuid: str
+    org_uuid: str | None
     output_dir: Path
     browser: str
     include_conversations: bool = False
     verbose: bool = False
+    list_orgs: bool = False
 
 
 def get_config_from_env() -> dict:
@@ -302,6 +303,31 @@ def _api_request(
     if last_error:
         raise last_error
     raise APIError("Request failed after all retries")
+
+
+def discover_organizations(session: "requests.Session") -> list[dict]:
+    """Discover available organizations via bootstrap endpoint.
+
+    Args:
+        session: Authenticated requests session
+
+    Returns:
+        List of organization dicts with uuid and name
+    """
+    url = "https://claude.ai/api/bootstrap"
+    data = _api_request(session, url)
+
+    if not isinstance(data, dict):
+        raise APIError(f"Unexpected bootstrap response: {type(data)}")
+
+    memberships = data.get("account", {}).get("memberships", [])
+    orgs = []
+    for m in memberships:
+        org = m.get("organization", {})
+        if org.get("uuid"):
+            orgs.append({"uuid": org["uuid"], "name": org.get("name", "Unknown")})
+
+    return orgs
 
 
 def fetch_projects(session: "requests.Session", org_uuid: str) -> list[dict]:
@@ -700,7 +726,11 @@ def sync(config: Config) -> int:
 
     from tqdm import tqdm
 
-    log.info(f"Syncing organization {config.org_uuid}")
+    # org_uuid is guaranteed to be set by main() at this point
+    assert config.org_uuid is not None
+    org_uuid = config.org_uuid
+
+    log.info(f"Syncing organization {org_uuid}")
     log.info(f"Output directory: {config.output_dir}")
     log.info(f"Browser: {config.browser}")
 
@@ -716,7 +746,7 @@ def sync(config: Config) -> int:
 
         # Step 3: Fetch projects
         log.info("Fetching projects...")
-        projects = fetch_projects(session, config.org_uuid)
+        projects = fetch_projects(session, org_uuid)
         log.info(f"Found {len(projects)} projects")
 
         # Step 4: Fetch docs and write output for each project
@@ -728,19 +758,17 @@ def sync(config: Config) -> int:
             log.debug(f"Processing: {project_name}")
 
             # Fetch full project details (includes prompt_template)
-            full_project = fetch_project_details(
-                session, config.org_uuid, project["uuid"]
-            )
+            full_project = fetch_project_details(session, org_uuid, project["uuid"])
 
             # Fetch docs
-            docs = fetch_project_docs(session, config.org_uuid, project["uuid"])
+            docs = fetch_project_docs(session, org_uuid, project["uuid"])
             full_project["_docs_count"] = len(docs)  # Track for index
 
             write_project_output(full_project, docs, config.output_dir)
             synced_projects.append(full_project)
 
         # Step 5: Write index
-        write_index(synced_projects, config.output_dir, config.org_uuid, synced_at)
+        write_index(synced_projects, config.output_dir, org_uuid, synced_at)
 
         log.info(f"Sync complete! {len(projects)} projects synced to {config.output_dir}")
         return 0
@@ -779,16 +807,24 @@ def parse_args(argv: list[str] | None = None) -> Config:
     env_config = get_config_from_env()
 
     parser = argparse.ArgumentParser(
-        description="Sync Claude web app projects to local storage.",
+        description="Sync Claude web app projects to local storage for Claude Code.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  %(prog)s                                    # Auto-discover org (if only one)
+  %(prog)s --list-orgs                        # List available organizations
   %(prog)s f3e5048f-1380-4436-83cf-085832fff594
   %(prog)s f3e5048f-1380-4436-83cf-085832fff594 -o ./my-projects
-  %(prog)s f3e5048f-1380-4436-83cf-085832fff594 --browser chrome
 
-Environment variables:
+Finding your org UUID:
+  Run with --list-orgs to see available organizations, or:
+  1. Open claude.ai, log in
+  2. DevTools (F12) > Network tab
+  3. Filter for 'organizations' in any request URL
+
+Environment:
   CLAUDE_ORG_UUID    Default organization UUID
+  .claude-sync.env   Local config file (checked in cwd and ~/)
         """,
     )
 
@@ -796,7 +832,13 @@ Environment variables:
         "org_uuid",
         nargs="?",
         default=env_config.get("CLAUDE_ORG_UUID"),
-        help="Organization UUID (or set CLAUDE_ORG_UUID env var)",
+        help="Organization UUID (optional if only one org, or set CLAUDE_ORG_UUID)",
+    )
+
+    parser.add_argument(
+        "--list-orgs",
+        action="store_true",
+        help="List available organizations and exit",
     )
 
     parser.add_argument(
@@ -831,11 +873,7 @@ Environment variables:
 
     args = parser.parse_args(argv)
 
-    # Validate org_uuid
-    if not args.org_uuid:
-        parser.error(
-            "org_uuid is required. Provide as argument or set CLAUDE_ORG_UUID env var."
-        )
+    # org_uuid validation happens in main() after checking list_orgs
 
     return Config(
         org_uuid=args.org_uuid,
@@ -843,7 +881,44 @@ Environment variables:
         browser=args.browser,
         include_conversations=args.conversations,
         verbose=args.verbose,
+        list_orgs=args.list_orgs,
     )
+
+
+def list_organizations(config: Config) -> int:
+    """List available organizations and exit.
+
+    Args:
+        config: Runtime configuration
+
+    Returns:
+        Exit code
+    """
+    try:
+        log.info("Extracting session cookies...")
+        cookies = get_session_cookies(config.browser)
+        session = create_session(cookies)
+
+        log.info("Discovering organizations...")
+        orgs = discover_organizations(session)
+
+        if not orgs:
+            log.error("No organizations found. Are you logged into claude.ai?")
+            return 1
+
+        print("\nAvailable organizations:")
+        for org in orgs:
+            print(f"  {org['uuid']}  {org['name']}")
+        print(f"\nUse: ./claude_sync.py <uuid> to sync a specific organization")
+
+        return 0
+
+    except CookieExtractionError as e:
+        log.error(f"Cookie extraction failed:\n{e}")
+        return 1
+    except APIError as e:
+        log.error(f"API error:\n{e}")
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -859,6 +934,37 @@ def main(argv: list[str] | None = None) -> int:
 
     if config.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+
+    # Handle --list-orgs
+    if config.list_orgs:
+        return list_organizations(config)
+
+    # Auto-discover org if not provided
+    if not config.org_uuid:
+        try:
+            log.info("No org UUID provided, attempting auto-discovery...")
+            cookies = get_session_cookies(config.browser)
+            session = create_session(cookies)
+            orgs = discover_organizations(session)
+
+            if len(orgs) == 0:
+                log.error("No organizations found. Are you logged into claude.ai?")
+                return 1
+            elif len(orgs) == 1:
+                config.org_uuid = orgs[0]["uuid"]
+                log.info(f"Auto-selected organization: {orgs[0]['name']}")
+            else:
+                log.error("Multiple organizations found. Please specify one:")
+                for org in orgs:
+                    print(f"  {org['uuid']}  {org['name']}")
+                print("\nOr set CLAUDE_ORG_UUID in .claude-sync.env")
+                return 1
+        except CookieExtractionError as e:
+            log.error(f"Cookie extraction failed:\n{e}")
+            return 1
+        except APIError as e:
+            log.error(f"API error during discovery:\n{e}")
+            return 1
 
     return sync(config)
 
