@@ -12,6 +12,7 @@ This command helps configure periodic automatic syncing using the platform's nat
 ## CLI Reference
 
 **IMPORTANT**: The correct CLI flags for claude_sync.py are:
+- `--dry-run` - validate config and auth without syncing (use this to test!)
 - `--include-standalone` (NOT `--standalone`) - include conversations not in projects
 - `-o PATH` or `--output PATH` - custom output directory
 - `-b edge|chrome` or `--browser` - browser for cookie extraction
@@ -198,25 +199,20 @@ Register-ScheduledTask -TaskName "ClaudeSync" -Action $action -Trigger $trigger 
 
 ### 3. Validate the command first
 
-**Before installing automation**, validate that the command will work:
+**Before installing automation**, run a dry-run to validate everything works:
 
 ```bash
-# 1. Verify the script runs and flags are valid
-uv run --script /path/to/claude_sync.py sync --help
-
-# 2. Verify authentication works (quick status check)
-uv run --script /path/to/claude_sync.py status --remote -o ~/.local/share/claude-sync
+uv run --script /path/to/claude_sync.py ORG_UUID --dry-run --include-standalone
 ```
 
-This catches:
-- Wrong flag names (--help will fail if flags are invalid in the plist)
-- Missing dependencies
-- Script path problems
-- Authentication issues (status --remote tests cookie extraction)
+The `--dry-run` flag:
+- Extracts browser cookies (tests auth)
+- Connects to Claude.ai API (tests network/session)
+- Lists projects that would be synced
+- Shows all configured options
+- **Does NOT write any files**
 
-If either fails, debug before setting up automation. The status check is fast and non-destructive.
-
-**Note**: There's no --dry-run flag, so we validate indirectly rather than running a full sync.
+If the dry-run succeeds, the automated sync will work. If it fails, debug before installing automation.
 
 ### 4. Confirm and install
 
