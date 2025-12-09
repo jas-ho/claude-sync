@@ -2069,7 +2069,7 @@ def sync(config: Config) -> int:
 app = typer.Typer(
     help="Sync Claude web app projects to local storage for Claude Code.",
     add_completion=False,  # Disable shell completion for simpler install
-    no_args_is_help=False,  # Allow running without args for auto-discover
+    no_args_is_help=False,  # Allow callback to handle no-args case for backward compat
     rich_markup_mode="rich",  # Enable rich formatting
 )
 
@@ -2108,8 +2108,8 @@ def list_organizations(config: Config) -> int:
     except APIError as e:
         log.error(f"API error:\n{e}")
         return 1
-@app.command()
-def main(
+@app.command(name="sync")
+def sync_command(
     org_uuid: Annotated[
         Optional[str],
         typer.Argument(
@@ -2251,5 +2251,38 @@ def main(
         raise typer.Exit(code=130)  # Standard SIGINT exit code
 
 
+@app.command()
+def status(
+    output: Annotated[
+        Path,
+        typer.Option("-o", "--output", help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})"),
+    ] = DEFAULT_OUTPUT_DIR,
+) -> None:
+    """Show sync status and detect changes.
+
+    Displays information about the last sync and detects any changes
+    that would be synced on the next run.
+    """
+    print("Status command not yet implemented")
+    raise typer.Exit(0)
+
+
 if __name__ == "__main__":
+    import sys
+
+    # Backward compatibility: If no subcommand is provided, default to 'sync'
+    # This allows `claude_sync.py`, `claude_sync.py <uuid>`, and
+    # `claude_sync.py --list-orgs` to work by automatically inserting 'sync'
+
+    # Get all args after script name
+    args = sys.argv[1:]
+
+    # List of known subcommands
+    known_commands = {"sync", "status"}
+
+    # If no args, or first arg is not a subcommand/help, insert 'sync'
+    if not args or (args[0] not in known_commands and args[0] != "--help"):
+        # Insert 'sync' as the subcommand
+        sys.argv.insert(1, "sync")
+
     app()
