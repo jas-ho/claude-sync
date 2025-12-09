@@ -115,7 +115,9 @@ def acquire_lock(output_dir: Path) -> int:
             with open(lock_path) as f:
                 pid = f.read().strip()
             raise RuntimeError(f"Another sync is running (PID: {pid})")
-        except Exception:
+        except (OSError, ValueError):
+            # OSError: file doesn't exist or can't be read
+            # ValueError: PID is not valid
             raise RuntimeError("Another sync is running")
 
     # Write our PID
@@ -131,7 +133,9 @@ def release_lock(fd: int) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
     except Exception:
-        pass  # Best effort
+        # Intentionally broad: Best-effort cleanup in finally blocks
+        # Should never fail the main operation
+        pass
 
 
 @dataclass
@@ -289,7 +293,9 @@ def get_session_cookies(browser: str) -> "http.cookiejar.CookieJar":
             f"Original error: {sanitize_sensitive_data(str(e))}"
         ) from e
     except Exception as e:
-        # browser-cookie3 can raise various exceptions
+        # Intentionally broad: browser-cookie3 raises many different exception types
+        # (sqlite3.OperationalError, pysqlite2.dbapi2.OperationalError, etc.)
+        # We catch and re-raise as CookieExtractionError for consistent error handling
         error_str = str(e).lower()
         if "locked" in error_str or "database" in error_str:
             raise CookieExtractionError(
@@ -489,7 +495,10 @@ def _api_request(
             if attempt < retries - 1:
                 log.warning(f"Network error, retrying in 1s... ({e})")
                 time.sleep(1)
-        except Exception as e:
+        except (ValueError, TypeError, AttributeError) as e:
+            # ValueError: malformed URL, invalid request parameters
+            # TypeError: invalid argument types
+            # AttributeError: missing expected attributes on response
             raise APIError(f"Request failed: {e}") from e
 
     # All retries exhausted
@@ -738,6 +747,25 @@ def sanitize_filename(name: str, max_len: int = 200) -> str:
     return name or "unnamed"
 
 
+def validate_path_within_directory(file_path: Path, parent_dir: Path) -> bool:
+    """Validate that a file path stays within the expected parent directory.
+
+    Security check to prevent path traversal attacks via corrupted state files.
+
+    Args:
+        file_path: The file path to validate
+        parent_dir: The parent directory that file_path must stay within
+
+    Returns:
+        True if file_path is within parent_dir, False otherwise
+    """
+    try:
+        file_path.resolve().relative_to(parent_dir.resolve())
+        return True
+    except (ValueError, RuntimeError):
+        return False
+
+
 def get_unique_filename(
     base: str, existing: set[str], case_insensitive: bool = True
 ) -> str:
@@ -868,8 +896,10 @@ def atomic_write_json(path: Path, data: dict) -> None:
 
         # Atomic rename (POSIX guarantees atomicity)
         tmp.replace(path)
-    except Exception:
-        # Clean up temp file on error
+    except (OSError, TypeError, ValueError) as e:
+        # OSError: file I/O errors (permissions, disk full, etc.)
+        # TypeError/ValueError: json.dump errors (non-serializable data)
+        # Clean up temp file on error, then re-raise
         tmp.unlink(missing_ok=True)
         raise
 
@@ -1033,7 +1063,10 @@ _No project instructions defined._
                     if not prev_safe.lower().endswith(".md"):
                         prev_safe = f"{prev_safe}.md"
                     old_doc_path = docs_dir / prev_safe
-                    if old_doc_path.exists():
+                    # Validate path doesn't escape docs directory
+                    if not validate_path_within_directory(old_doc_path, docs_dir):
+                        log.warning(f"Skipping suspicious filename in state: {prev_filename}")
+                    elif old_doc_path.exists():
                         log.info(f"Doc renamed: '{prev_filename}' -> '{doc_filename}', removing old file")
                         old_doc_path.unlink()
 
@@ -1055,6 +1088,10 @@ _No project instructions defined._
                     if not prev_safe.lower().endswith(".md"):
                         prev_safe = f"{prev_safe}.md"
                     old_doc_path = docs_dir / prev_safe
+                    # Validate path doesn't escape docs directory
+                    if not validate_path_within_directory(old_doc_path, docs_dir):
+                        log.warning(f"Skipping suspicious filename in state: {prev_filename}")
+                        continue
                     if old_doc_path.exists():
                         old_doc_path.unlink()
                         log.info(f"Deleted orphaned doc: {prev_filename}")
@@ -1466,7 +1503,10 @@ def write_conversation_output(
         if prev_filename and prev_filename != filename:
             # Conversation was renamed - delete old file
             old_convo_path = convos_dir / prev_filename
-            if old_convo_path.exists():
+            # Validate path doesn't escape conversations directory
+            if not validate_path_within_directory(old_convo_path, convos_dir):
+                log.warning(f"Skipping suspicious filename in state: {prev_filename}")
+            elif old_convo_path.exists():
                 log.info(f"Conversation renamed: '{prev_filename}' -> '{filename}', removing old file")
                 old_convo_path.unlink()
 
@@ -1524,7 +1564,10 @@ def write_standalone_conversation(
         if prev_filename and prev_filename != filename:
             # Conversation was renamed - delete old file
             old_convo_path = standalone_dir / prev_filename
-            if old_convo_path.exists():
+            # Validate path doesn't escape standalone directory
+            if not validate_path_within_directory(old_convo_path, standalone_dir):
+                log.warning(f"Skipping suspicious filename in state: {prev_filename}")
+            elif old_convo_path.exists():
                 log.info(f"Standalone conversation renamed: '{prev_filename}' -> '{filename}'")
                 old_convo_path.unlink()
 
@@ -1858,12 +1901,17 @@ def sync(config: Config) -> int:
 
                         # Detect deleted conversations
                         current_convo_uuids = {c.get("uuid") for c in convo_list}
+                        conversations_dir = project_dir / "conversations"
                         for prev_uuid, prev_data in prev_convos.items():
                             if prev_uuid not in current_convo_uuids:
                                 # Conversation was deleted remotely
                                 prev_filename = prev_data.get("filename", "")
                                 if prev_filename:
-                                    old_file = project_dir / "conversations" / prev_filename
+                                    old_file = conversations_dir / prev_filename
+                                    # Validate path doesn't escape conversations directory
+                                    if not validate_path_within_directory(old_file, conversations_dir):
+                                        log.warning(f"Skipping suspicious filename in state: {prev_filename}")
+                                        continue
                                     if old_file.exists():
                                         old_file.unlink()
                                         log.info(f"Deleted orphaned conversation: {prev_filename}")
@@ -1895,9 +1943,14 @@ def sync(config: Config) -> int:
                 synced_projects.append(full_project)
 
             except Exception as e:
-                # Project sync failed - log error and continue with other projects
+                # Intentionally broad: catch any error in project sync and continue
+                # with other projects rather than failing the entire sync
                 error_msg = str(e)
                 log.error(f"Failed to sync project '{project_name}': {error_msg}")
+                if config.verbose:
+                    import traceback
+                    tb = traceback.format_exc()
+                    log.error(sanitize_sensitive_data(tb))
                 failed_projects.append((project_name, error_msg))
                 # Don't add to synced_projects or new_state - exclude from index.json
                 continue
@@ -1990,6 +2043,10 @@ def sync(config: Config) -> int:
                         prev_filename = prev_data.get("filename", "")
                         if prev_filename:
                             old_file = standalone_dir / prev_filename
+                            # Validate path doesn't escape standalone directory
+                            if not validate_path_within_directory(old_file, standalone_dir):
+                                log.warning(f"Skipping suspicious filename in state: {prev_filename}")
+                                continue
                             if old_file.exists():
                                 old_file.unlink()
                                 log.info(f"Deleted orphaned standalone conversation: {prev_filename}")
@@ -2002,6 +2059,8 @@ def sync(config: Config) -> int:
                     log.info(f"Standalone conversations: {metrics['standalone_synced']} synced, {metrics['standalone_skipped']} skipped")
 
             except Exception as e:
+                # Intentionally broad: catch any error in standalone sync
+                # Don't fail entire sync if standalone conversations fail
                 log.error(f"Failed to sync standalone conversations: {e}")
                 if config.verbose:
                     import traceback
@@ -2053,6 +2112,8 @@ def sync(config: Config) -> int:
         log.error(f"Feature not implemented: {e}")
         return 1
     except Exception as e:
+        # Intentionally broad: top-level handler for any unexpected error
+        # All expected errors are caught above; this is last resort
         log.error(f"Sync failed: {e}")
         if config.verbose:
             import traceback
@@ -2940,6 +3001,8 @@ def status(
         log.error(f"API error:\n{e}")
         raise typer.Exit(1)
     except Exception as e:
+        # Intentionally broad: top-level handler for any unexpected error
+        # All expected errors are caught above
         log.error(f"Failed to load status: {e}")
         raise typer.Exit(1)
 
