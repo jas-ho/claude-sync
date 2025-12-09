@@ -196,23 +196,27 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable
 Register-ScheduledTask -TaskName "ClaudeSync" -Action $action -Trigger $trigger -Settings $settings
 ```
 
-### 3. Test the command first
+### 3. Validate the command first
 
-**Before installing automation**, run a dry test of the exact command that will be scheduled:
+**Before installing automation**, validate that the command will work:
 
 ```bash
-# Test the command (this actually runs a sync, so user knows it works)
-uv run --script /path/to/claude_sync.py ORG_UUID --include-standalone
+# 1. Verify the script runs and flags are valid
+uv run --script /path/to/claude_sync.py sync --help
+
+# 2. Verify authentication works (quick status check)
+uv run --script /path/to/claude_sync.py status --remote -o ~/.local/share/claude-sync
 ```
 
 This catches:
-- Wrong flag names
+- Wrong flag names (--help will fail if flags are invalid in the plist)
 - Missing dependencies
-- Invalid org UUID
-- Permission issues
 - Script path problems
+- Authentication issues (status --remote tests cookie extraction)
 
-Only proceed to installation if the test succeeds. If it fails, help debug before setting up automation.
+If either fails, debug before setting up automation. The status check is fast and non-destructive.
+
+**Note**: There's no --dry-run flag, so we validate indirectly rather than running a full sync.
 
 ### 4. Confirm and install
 
