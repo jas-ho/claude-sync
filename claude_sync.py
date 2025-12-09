@@ -3584,6 +3584,280 @@ def status(
         raise typer.Exit(1)
 
 
+@app.command()
+def setup_automation(
+    interval: Annotated[
+        str,
+        typer.Option(
+            "--interval",
+            help="Sync interval: 'hourly', 'daily', or minutes (e.g., '30')",
+        ),
+    ] = "hourly",
+    org_uuid: Annotated[
+        Optional[str],
+        typer.Option(
+            "--org-uuid",
+            help="Organization UUID to sync (will read from env or config if not provided)",
+            envvar="CLAUDE_ORG_UUID",
+        ),
+    ] = None,
+    output: Annotated[
+        Path,
+        typer.Option(
+            "-o", "--output", help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})"
+        ),
+    ] = DEFAULT_OUTPUT_DIR,
+    browser: Annotated[
+        Browser,
+        typer.Option(
+            "-b",
+            "--browser",
+            help="Browser to extract cookies from (default: edge)",
+            case_sensitive=False,
+        ),
+    ] = Browser.edge,
+    include_standalone: Annotated[
+        bool,
+        typer.Option(
+            "--include-standalone",
+            help="Include standalone conversations in automated syncs",
+        ),
+    ] = False,
+    install: Annotated[
+        bool,
+        typer.Option("--install", help="Install the launchd service (copy to ~/Library/LaunchAgents/)"),
+    ] = False,
+    uninstall: Annotated[
+        bool,
+        typer.Option("--uninstall", help="Uninstall the launchd service and remove from ~/Library/LaunchAgents/"),
+    ] = False,
+) -> None:
+    """Set up automated periodic syncing using macOS launchd.
+
+    This command generates a launchd plist file for periodic syncing and optionally
+    installs it to ~/Library/LaunchAgents/ for automatic execution.
+
+    Examples:
+        # Generate plist for hourly syncs (default)
+        ./claude_sync.py setup-automation
+
+        # Generate and install for syncs every 30 minutes
+        ./claude_sync.py setup-automation --interval 30 --install
+
+        # Generate for daily syncs
+        ./claude_sync.py setup-automation --interval daily
+
+        # Uninstall automation
+        ./claude_sync.py setup-automation --uninstall
+
+    The generated plist will:
+    - Run syncs at the specified interval
+    - Use the organization UUID from --org-uuid, CLAUDE_ORG_UUID env var, or .claude-sync.env
+    - Log output to ~/Library/Logs/claude-sync/
+    - Use 'uv run' to ensure dependencies are available
+
+    After installation:
+        # Load the service (start it)
+        launchctl load ~/Library/LaunchAgents/com.claude-sync.plist
+
+        # Check service status
+        launchctl list | grep claude-sync
+
+        # View logs
+        tail -f ~/Library/Logs/claude-sync/sync.log
+
+        # Unload the service (stop it)
+        launchctl unload ~/Library/LaunchAgents/com.claude-sync.plist
+    """
+    import xml.etree.ElementTree as ET
+    from xml.dom import minidom
+
+    plist_filename = "com.claude-sync.plist"
+    launch_agents_dir = Path.home() / "Library" / "LaunchAgents"
+    plist_path = launch_agents_dir / plist_filename
+
+    # Handle uninstall
+    if uninstall:
+        if not plist_path.exists():
+            log.error(f"Service not installed at {plist_path}")
+            raise typer.Exit(1)
+
+        # Try to unload first
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["launchctl", "unload", str(plist_path)],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                log.info("Service unloaded successfully")
+            else:
+                log.warning(f"Could not unload service (may not be loaded): {result.stderr.strip()}")
+        except Exception as e:
+            log.warning(f"Could not unload service: {e}")
+
+        # Remove plist file
+        plist_path.unlink()
+        log.info(f"Removed {plist_path}")
+        log.info("Automation uninstalled successfully")
+        return
+
+    # Get org_uuid from environment if not provided
+    if org_uuid is None:
+        env_config = get_config_from_env()
+        org_uuid = env_config.get("CLAUDE_ORG_UUID")
+
+    # Validate org_uuid is available
+    if org_uuid is None:
+        log.error(
+            "No organization UUID provided. Please either:\n"
+            "  1. Use --org-uuid flag\n"
+            "  2. Set CLAUDE_ORG_UUID environment variable\n"
+            "  3. Create .claude-sync.env with CLAUDE_ORG_UUID"
+        )
+        raise typer.Exit(1)
+
+    # Parse interval
+    start_interval = None
+    start_calendar_interval = None
+
+    if interval.lower() == "hourly":
+        start_interval = 3600
+    elif interval.lower() == "daily":
+        # Run daily at 2 AM
+        start_calendar_interval = {"Hour": 2, "Minute": 0}
+    else:
+        # Try to parse as minutes
+        try:
+            minutes = int(interval)
+            if minutes < 1 or minutes > 1440:
+                log.error("Interval must be between 1 and 1440 minutes")
+                raise typer.Exit(1)
+            start_interval = minutes * 60
+        except ValueError:
+            log.error(
+                f"Invalid interval: {interval}. Use 'hourly', 'daily', or a number of minutes (1-1440)"
+            )
+            raise typer.Exit(1)
+
+    # Get absolute path to the script
+    script_path = Path(__file__).resolve()
+
+    # Log directory
+    log_dir = Path.home() / "Library" / "Logs" / "claude-sync"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    stdout_log = log_dir / "sync.log"
+    stderr_log = log_dir / "error.log"
+
+    # Build ProgramArguments
+    program_args = [
+        "/usr/bin/env",
+        "uv",
+        "run",
+        "--script",
+        str(script_path),
+        "sync",
+        org_uuid,
+        "-o", str(output),
+        "-b", browser.value,
+    ]
+
+    if include_standalone:
+        program_args.append("--include-standalone")
+
+    # Build plist structure
+    plist_root = ET.Element("plist", version="1.0")
+    plist_dict = ET.SubElement(plist_root, "dict")
+
+    # Label
+    ET.SubElement(plist_dict, "key").text = "Label"
+    ET.SubElement(plist_dict, "string").text = "com.claude-sync"
+
+    # ProgramArguments
+    ET.SubElement(plist_dict, "key").text = "ProgramArguments"
+    program_args_array = ET.SubElement(plist_dict, "array")
+    for arg in program_args:
+        ET.SubElement(program_args_array, "string").text = arg
+
+    # WorkingDirectory (use home directory to ensure .claude-sync.env is found)
+    ET.SubElement(plist_dict, "key").text = "WorkingDirectory"
+    ET.SubElement(plist_dict, "string").text = str(Path.home())
+
+    # StandardOutPath
+    ET.SubElement(plist_dict, "key").text = "StandardOutPath"
+    ET.SubElement(plist_dict, "string").text = str(stdout_log)
+
+    # StandardErrorPath
+    ET.SubElement(plist_dict, "key").text = "StandardErrorPath"
+    ET.SubElement(plist_dict, "string").text = str(stderr_log)
+
+    # StartInterval or StartCalendarInterval
+    if start_interval:
+        ET.SubElement(plist_dict, "key").text = "StartInterval"
+        ET.SubElement(plist_dict, "integer").text = str(start_interval)
+    else:
+        ET.SubElement(plist_dict, "key").text = "StartCalendarInterval"
+        cal_dict = ET.SubElement(plist_dict, "dict")
+        assert start_calendar_interval is not None  # Either start_interval or this is set
+        for k, v in start_calendar_interval.items():
+            ET.SubElement(cal_dict, "key").text = k
+            ET.SubElement(cal_dict, "integer").text = str(v)
+
+    # RunAtLoad (run once on load)
+    ET.SubElement(plist_dict, "key").text = "RunAtLoad"
+    ET.SubElement(plist_dict, "true")
+
+    # EnvironmentVariables (pass through important vars)
+    ET.SubElement(plist_dict, "key").text = "EnvironmentVariables"
+    env_dict = ET.SubElement(plist_dict, "dict")
+    ET.SubElement(env_dict, "key").text = "PATH"
+    ET.SubElement(env_dict, "string").text = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+    # Format XML nicely
+    xml_string = ET.tostring(plist_root, encoding="unicode")
+    dom = minidom.parseString(xml_string)
+    pretty_xml = dom.toprettyxml(indent="  ")
+
+    # Remove extra blank lines
+    pretty_xml = "\n".join([line for line in pretty_xml.split("\n") if line.strip()])
+
+    # Print the plist
+    from rich.console import Console
+    from rich.syntax import Syntax
+
+    console = Console()
+    console.print("\n[bold]Generated launchd plist:[/bold]\n")
+    console.print(Syntax(pretty_xml, "xml", theme="monokai", line_numbers=False))
+    console.print()
+
+    # Install if requested
+    if install:
+        launch_agents_dir.mkdir(parents=True, exist_ok=True)
+
+        with open(plist_path, "w") as f:
+            f.write(pretty_xml)
+
+        log.info(f"Installed to {plist_path}")
+        console.print()
+        console.print("[bold green]Installation complete![/bold green]\n")
+        console.print("To start the service:\n")
+        console.print(f"  [cyan]launchctl load {plist_path}[/cyan]\n")
+        console.print("To check status:\n")
+        console.print("  [cyan]launchctl list | grep claude-sync[/cyan]\n")
+        console.print("To view logs:\n")
+        console.print(f"  [cyan]tail -f {stdout_log}[/cyan]\n")
+        console.print("To stop the service:\n")
+        console.print(f"  [cyan]launchctl unload {plist_path}[/cyan]\n")
+        console.print("To uninstall:\n")
+        console.print("  [cyan]./claude_sync.py setup-automation --uninstall[/cyan]\n")
+    else:
+        console.print("[yellow]Plist not installed (use --install to install)[/yellow]\n")
+        console.print("To install manually:\n")
+        console.print(f"  1. Save the above to {plist_path}")
+        console.print(f"  2. Run: [cyan]launchctl load {plist_path}[/cyan]\n")
+
+
 if __name__ == "__main__":
     import sys
 
@@ -3595,7 +3869,7 @@ if __name__ == "__main__":
     args = sys.argv[1:]
 
     # List of known subcommands
-    known_commands = {"sync", "status"}
+    known_commands = {"sync", "status", "setup-automation"}
 
     # If no args, or first arg is not a subcommand/help, insert 'sync'
     if not args or (args[0] not in known_commands and args[0] != "--help"):

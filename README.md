@@ -462,7 +462,53 @@ This usually resolves itself. The tool uses browser impersonation to minimize bl
 
 ## Advanced Usage
 
-### Automated sync (cron)
+### Automated sync
+
+#### macOS (launchd - recommended)
+
+Use the built-in automation setup:
+
+```bash
+# Generate and install hourly sync
+./claude_sync.py setup-automation --install
+
+# Custom interval (30 minutes)
+./claude_sync.py setup-automation --interval 30 --install
+
+# Daily sync at 2 AM
+./claude_sync.py setup-automation --interval daily --install
+
+# Include standalone conversations
+./claude_sync.py setup-automation --include-standalone --install
+```
+
+The service will:
+- Run at the specified interval
+- Log to `~/Library/Logs/claude-sync/`
+- Use your org UUID from `CLAUDE_ORG_UUID` env var or `.claude-sync.env`
+
+**Managing the service:**
+
+```bash
+# Start the service
+launchctl load ~/Library/LaunchAgents/com.claude-sync.plist
+
+# Check status
+launchctl list | grep claude-sync
+
+# View logs
+tail -f ~/Library/Logs/claude-sync/sync.log
+
+# Stop the service
+launchctl unload ~/Library/LaunchAgents/com.claude-sync.plist
+
+# Uninstall
+./claude_sync.py setup-automation --uninstall
+```
+
+For more options: `./claude_sync.py setup-automation --help`
+
+#### Unix/Linux (cron)
 
 ```bash
 # Add to crontab: sync every hour
