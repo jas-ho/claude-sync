@@ -9,14 +9,26 @@ This command helps configure periodic automatic syncing using the platform's nat
 - **Linux**: systemd user timers or cron
 - **Windows**: Task Scheduler
 
+## CLI Reference
+
+**IMPORTANT**: The correct CLI flags for claude_sync.py are:
+- `--include-standalone` (NOT `--standalone`) - include conversations not in projects
+- `-o PATH` or `--output PATH` - custom output directory
+- `-b edge|chrome` or `--browser` - browser for cookie extraction
+- `--skip-conversations` - skip conversation sync
+- `--full` - force full sync, ignore cache
+- `--no-git` - disable git auto-commit
+
+Run `uv run --script claude_sync.py sync --help` to see all options.
+
 ## Steps
 
 ### 1. Gather requirements
 
 Ask the user:
 - **Sync frequency**: How often should sync run? (hourly, daily, or custom interval in minutes)
-- **Organization UUID**: Check if already configured in `~/.claude-sync.env` or ask for it
-- **Include standalone conversations?**: Whether to sync conversations not attached to projects
+- **Organization UUID**: Check `~/.local/share/claude-sync/index.json` for existing orgs (look in the `orgs` key), or `~/.claude-sync.env`, or ask the user
+- **Include standalone conversations?**: Whether to sync conversations not attached to projects (uses `--include-standalone` flag)
 
 ### 2. Detect platform and generate config
 
@@ -41,6 +53,7 @@ Generate a plist file for `~/Library/LaunchAgents/com.claude-sync.plist`:
         <string>--script</string>
         <string>PATH_TO_SCRIPT/claude_sync.py</string>
         <string>ORG_UUID</string>
+        <!-- Add --include-standalone here if user wants standalone conversations -->
     </array>
     <key>StartInterval</key>
     <integer>3600</integer>
