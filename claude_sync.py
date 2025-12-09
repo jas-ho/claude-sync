@@ -2870,14 +2870,25 @@ def status(
         typer.Option("-b", "--browser", help="Browser to extract cookies from (default: edge)", case_sensitive=False),
     ] = Browser.edge,
 ) -> None:
-    """Show local sync status.
+    """Show local sync status and optionally check for remote changes.
 
     Displays information about the last sync including project counts,
-    document counts, and recently active projects.
+    document counts, conversation counts, and recently active projects.
 
-    Without --remote: Shows local status only (no authentication required)
-    With --remote: Compares local state with claude.ai to detect changes
-    With --check-docs: Also check for document content changes (requires --remote)
+    Examples:
+        # Show local status (no authentication required)
+        ./claude_sync.py status
+
+        # Check for remote changes
+        ./claude_sync.py status --remote
+
+        # Thorough check including document changes (slow)
+        ./claude_sync.py status --remote --check-docs
+
+    Modes:
+        Local only: Shows sync age, counts, and recently active projects
+        --remote: Detects new/modified/deleted projects and conversations
+        --check-docs: Also checks for document changes (requires --remote)
     """
     # Validate flag combinations
     if check_docs and not remote:

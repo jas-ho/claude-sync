@@ -28,6 +28,38 @@ Single UV script (`claude_sync.py`) with inline dependencies:
     └── docs/               # Project documents
 ```
 
+## Status Command
+
+Check sync health without running a full sync:
+
+```bash
+# Local status (no auth required)
+./claude_sync.py status
+
+# Check for remote changes
+./claude_sync.py status --remote
+
+# Thorough doc checking (slow)
+./claude_sync.py status --remote --check-docs
+```
+
+**Local status shows:**
+- Last sync time and age
+- Project, document, conversation counts
+- Recently active projects
+- Integrity check (directories match manifest)
+
+**Remote comparison (`--remote`) detects:**
+- New projects on claude.ai
+- Modified project instructions
+- New/modified conversations
+- Deleted projects
+
+**Document checking (`--check-docs`):**
+- Detects new, modified, or deleted documents
+- Requires `--remote` flag
+- May be slow as it fetches all document metadata
+
 ## Technical Constraints
 
 - **Read-only API**: No write endpoints for claude.ai projects exist
