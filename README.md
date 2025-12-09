@@ -17,7 +17,7 @@ Built as a single-file UV script with inline dependencies - no installation requ
 
 ```bash
 # 1. Download the script
-curl -O https://raw.githubusercontent.com/yourusername/claude-sync/main/claude_sync.py
+curl -O https://raw.githubusercontent.com/jas-ho/claude-sync/main/claude_sync.py
 chmod +x claude_sync.py
 
 # 2. Find your org UUID (see below)
@@ -99,6 +99,9 @@ Then just run `./claude_sync.py` without arguments.
 # Skip conversations (faster sync, only docs)
 ./claude_sync.py <org-uuid> --skip-conversations
 
+# Include standalone conversations (not in projects)
+./claude_sync.py <org-uuid> --include-standalone
+
 # Sync only one project (by name or UUID)
 ./claude_sync.py <org-uuid> -p "my-project"
 ./claude_sync.py <org-uuid> -p abc12345
@@ -127,6 +130,16 @@ By default, **claude-sync** only downloads changed content:
 
 Use `--full` to force re-download everything.
 
+### Standalone Conversations
+
+By default, **claude-sync** only syncs conversations within projects. You can also sync standalone conversations (conversations not attached to any project) using the `--include-standalone` flag:
+
+```bash
+./claude_sync.py <org-uuid> --include-standalone
+```
+
+Standalone conversations are saved to the `_standalone/` directory at the root of your output directory.
+
 ## Output Structure
 
 ```
@@ -135,6 +148,10 @@ Use `--full` to force re-download everything.
 ├── .sync-state.json                 # Internal sync state (timestamps, hashes)
 ├── index.json                       # Project manifest
 ├── .backup/                         # Timestamped backups of changed files
+├── _standalone/                     # Standalone conversations (not in projects)
+│   ├── index.json                   # Standalone conversation manifest
+│   ├── conversation-1.md
+│   └── conversation-2.md
 └── project-name-abc12345/           # One directory per project
     ├── CLAUDE.md                    # Project instructions (from prompt_template)
     ├── meta.json                    # Project metadata
@@ -303,6 +320,7 @@ git commit -m "Manual sync"
 | `-o, --output` | `~/.local/share/claude-sync` | Output directory |
 | `-b, --browser` | `edge` | Browser to extract cookies from (`edge` or `chrome`) |
 | `--skip-conversations` | `false` | Skip syncing conversations (faster) |
+| `--include-standalone` | `false` | Include standalone conversations (not in projects) |
 | `-p, --project` | All projects | Sync only matching project (UUID or name substring) |
 | `--full` | `false` | Force full sync, ignore cache |
 | `--no-git` | `false` | Disable automatic git commits |

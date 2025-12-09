@@ -34,3 +34,4 @@ history/
 # Test outputs
 /tmp/
 *.log
+test-data/

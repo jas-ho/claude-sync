@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(pytest:*)",
+      "Bash(uv:*)",
+      "Bash(pip:*)",
+      "WebFetch(domain:docs.python.org)",
+      "WebFetch(domain:pypi.org)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git stash:*)",
+      "Bash(git checkout:*)",
+      "Bash(git pull:*)",
+      "Bash(uv run:*)",
+      "Bash(./claude_sync.py:*)",
+      "Bash(git push:*)",
+      "Bash(CLAUDE_ORG_UUID= ./claude_sync.py:*)",
+      "Bash(find:*)",
+      "Bash(launchctl list:*)",
+      "Bash(cat:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

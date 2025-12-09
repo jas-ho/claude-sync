@@ -21,11 +21,18 @@ Single UV script (`claude_sync.py`) with inline dependencies:
 **Output**: Directory structure (not ZIP) for git tracking:
 ```
 <output-dir>/
+├── .sync-state.json        # Internal sync state (timestamps, hashes)
 ├── index.json              # Manifest with sync metadata
+├── _standalone/            # Standalone conversations (not in projects)
+│   ├── index.json          # Standalone conversation manifest
+│   └── conversation-*.md   # Individual standalone conversations
 └── <project-slug>/
     ├── CLAUDE.md           # Project instructions (from prompt_template)
     ├── meta.json           # Project metadata
-    └── docs/               # Project documents
+    ├── docs/               # Project documents
+    └── conversations/      # Project conversation history
+        ├── index.json      # Conversation manifest
+        └── conversation-*.md  # Individual conversations
 ```
 
 ## Status Command
