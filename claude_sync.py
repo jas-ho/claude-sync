@@ -2407,6 +2407,244 @@ def format_time_ago(seconds: float) -> str:
         return f"{days} day{'s' if days != 1 else ''} ago"
 
 
+def fetch_remote_status(
+    session: "requests.Session",
+    org_uuid: str,
+    local_status: dict,
+    local_state: dict,
+) -> dict:
+    """Fetch remote state and compare with local.
+
+    Args:
+        session: Authenticated requests session
+        org_uuid: Organization UUID
+        local_status: Local status dict from load_local_status
+        local_state: Sync state dict from load_sync_state
+
+    Returns:
+        Dict with:
+        - new_projects: list of projects on remote but not local
+        - deleted_projects: list of projects in local but not on remote
+        - modified_projects: list of dicts with modification details
+    """
+    # Fetch remote projects
+    log.debug("Fetching remote project list...")
+    remote_projects = fetch_projects(session, org_uuid)
+
+    # Build sets of UUIDs
+    remote_uuids = {p["uuid"] for p in remote_projects}
+    local_uuids = set(local_state.get("projects", {}).keys())
+
+    # Detect new and deleted projects
+    new_uuids = remote_uuids - local_uuids
+    deleted_uuids = local_uuids - remote_uuids
+
+    new_projects = [p for p in remote_projects if p["uuid"] in new_uuids]
+    deleted_projects = []
+    for uuid in deleted_uuids:
+        local_proj = local_state.get("projects", {}).get(uuid, {})
+        deleted_projects.append({
+            "uuid": uuid,
+            "name": local_proj.get("name", "Unknown"),
+        })
+
+    # Check modified projects (in both local and remote)
+    modified_projects = []
+    common_uuids = remote_uuids & local_uuids
+
+    for remote_proj in remote_projects:
+        if remote_proj["uuid"] not in common_uuids:
+            continue
+
+        uuid = remote_proj["uuid"]
+        local_proj_state = local_state.get("projects", {}).get(uuid, {})
+
+        changes = {}
+
+        # Check updated_at timestamp
+        remote_updated = remote_proj.get("updated_at", "")
+        local_updated = local_proj_state.get("updated_at", "")
+
+        timestamp_changed = not timestamps_equal(remote_updated, local_updated)
+
+        # Always fetch project details and conversations to detect all changes
+        # (timestamp doesn't always update for instruction changes or new conversations)
+        try:
+            # Fetch full project details to get prompt_template
+            log.debug(f"Fetching details for {remote_proj.get('name', 'Unknown')}...")
+            full_project = fetch_project_details(session, org_uuid, uuid)
+
+            # Check instructions (prompt_template) hash
+            remote_template_hash = compute_doc_hash(full_project.get("prompt_template", ""))
+            local_template_hash = local_proj_state.get("prompt_template_hash", "")
+
+            if remote_template_hash != local_template_hash:
+                changes["instructions"] = "changed"
+
+            # Fetch and compare conversation counts
+            try:
+                remote_convos = fetch_project_conversations(session, org_uuid, uuid)
+                remote_convo_count = len(remote_convos)
+                local_convos = local_proj_state.get("conversations", {})
+                local_convo_count = len(local_convos)
+
+                if remote_convo_count != local_convo_count:
+                    changes["conversations"] = {
+                        "local": local_convo_count,
+                        "remote": remote_convo_count,
+                        "diff": remote_convo_count - local_convo_count,
+                    }
+
+                # Check for modified conversations (by updated_at)
+                modified_convos = 0
+                for convo_meta in remote_convos:
+                    convo_uuid = convo_meta.get("uuid")
+                    if convo_uuid in local_convos:
+                        local_convo = local_convos[convo_uuid]
+                        if not timestamps_equal(
+                            convo_meta.get("updated_at", ""),
+                            local_convo.get("updated_at", "")
+                        ):
+                            modified_convos += 1
+
+                if modified_convos > 0:
+                    if "conversations" not in changes:
+                        changes["conversations"] = {"local": local_convo_count, "remote": remote_convo_count, "diff": 0}
+                    changes["conversations"]["modified"] = modified_convos
+
+            except (APIError, FileNotFoundError) as e:
+                log.debug(f"Could not fetch conversations for {remote_proj.get('name')}: {e}")
+                # Not critical, continue
+
+            # Note: We don't fetch full doc content for efficiency
+            # Only mention docs if something else changed (timestamp, instructions, or conversations)
+            # This avoids noisy output when docs exist but haven't changed
+            # Users can run full sync to check doc content changes
+
+        except (APIError, FileNotFoundError) as e:
+            log.warning(f"Could not fetch details for project {uuid}: {e}")
+            changes["error"] = str(e)
+
+        # Only add to modified list if there are actual changes
+        if changes:
+            modified_projects.append({
+                "uuid": uuid,
+                "name": remote_proj.get("name", "Unknown"),
+                "changes": changes,
+                "created_at": remote_proj.get("created_at", ""),
+                "updated_at": remote_proj.get("updated_at", ""),
+            })
+
+    return {
+        "new_projects": new_projects,
+        "deleted_projects": deleted_projects,
+        "modified_projects": modified_projects,
+    }
+
+
+def format_remote_status(local_status: dict, remote_status: dict) -> None:
+    """Format and print remote comparison status.
+
+    Args:
+        local_status: Local status dict from load_local_status
+        remote_status: Remote status dict from fetch_remote_status
+    """
+    from rich.console import Console
+
+    console = Console()
+
+    # First, show local status summary
+    format_local_status(local_status)
+
+    # Now show remote comparison
+    new_projects = remote_status.get("new_projects", [])
+    deleted_projects = remote_status.get("deleted_projects", [])
+    modified_projects = remote_status.get("modified_projects", [])
+
+    total_changes = len(new_projects) + len(deleted_projects) + len(modified_projects)
+
+    if total_changes == 0:
+        console.print("[bold green]No changes detected on remote[/bold green]")
+        console.print("Local sync is up to date with claude.ai")
+        console.print()
+        return
+
+    # Show changes detected
+    console.print("[bold yellow]Changes Detected:[/bold yellow]")
+    console.print()
+
+    # New projects
+    if new_projects:
+        console.print("[bold cyan]New Projects:[/bold cyan]")
+        for proj in new_projects:
+            name = proj.get("name", "Unknown")
+            created = proj.get("created_at", "")
+            date_str = ""
+            if created:
+                dt = parse_timestamp(created)
+                if dt:
+                    date_str = dt.strftime("%b %d, %Y")
+
+            console.print(f"  [green][NEW][/green]  \"{name}\"", end="")
+            if date_str:
+                console.print(f" - created {date_str}")
+            else:
+                console.print()
+        console.print()
+
+    # Modified projects
+    if modified_projects:
+        console.print("[bold cyan]Modified Projects:[/bold cyan]")
+        for proj in modified_projects:
+            name = proj.get("name", "Unknown")
+            changes = proj.get("changes", {})
+
+            console.print(f"  [yellow][MOD][/yellow]  \"{name}\"")
+
+            # Instructions changed
+            if "instructions" in changes:
+                console.print("         - Instructions: [yellow]changed[/yellow]")
+
+            # Conversations changed
+            if "conversations" in changes:
+                conv_info = changes["conversations"]
+                diff = conv_info.get("diff", 0)
+                modified = conv_info.get("modified", 0)
+
+                parts = []
+                if diff > 0:
+                    parts.append(f"+{diff} new")
+                elif diff < 0:
+                    parts.append(f"{diff} deleted")
+
+                if modified > 0:
+                    parts.append(f"{modified} modified")
+
+                if parts:
+                    console.print(f"         - Conversations: {', '.join(parts)}")
+
+            # Error fetching
+            if "error" in changes:
+                console.print(f"         - [red]Error: {changes['error']}[/red]")
+
+        console.print()
+
+    # Deleted projects
+    if deleted_projects:
+        console.print("[bold cyan]Deleted Projects:[/bold cyan]")
+        for proj in deleted_projects:
+            name = proj.get("name", "Unknown")
+            console.print(f"  [red][DEL][/red]  \"{name}\" - deleted remotely")
+        console.print()
+
+    # Summary
+    console.print("[bold]Summary:[/bold]")
+    console.print(f"  {len(new_projects)} new, {len(modified_projects)} modified, {len(deleted_projects)} deleted")
+    console.print()
+    console.print("[dim]Run [bold]claude_sync.py sync[/bold] to sync changes[/dim]")
+    console.print()
+
+
 def format_local_status(status: dict) -> None:
     """Format and print local status using Rich console.
 
@@ -2516,17 +2754,64 @@ def status(
         Path,
         typer.Option("-o", "--output", help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})"),
     ] = DEFAULT_OUTPUT_DIR,
+    remote: Annotated[
+        bool,
+        typer.Option("--remote", help="Check for changes on claude.ai (requires authentication)"),
+    ] = False,
+    browser: Annotated[
+        Browser,
+        typer.Option("-b", "--browser", help="Browser to extract cookies from (default: edge)", case_sensitive=False),
+    ] = Browser.edge,
 ) -> None:
     """Show local sync status.
 
     Displays information about the last sync including project counts,
     document counts, and recently active projects.
 
-    Does not require authentication or network access.
+    Without --remote: Shows local status only (no authentication required)
+    With --remote: Compares local state with claude.ai to detect changes
     """
     try:
         status_data = load_local_status(output)
-        format_local_status(status_data)
+
+        if remote:
+            # Get org_uuid from local state
+            if not status_data.get("has_data"):
+                log.error("No local sync data found. Run 'sync' first before using --remote.")
+                raise typer.Exit(1)
+
+            # Load org_uuid from index.json
+            index_path = output / "index.json"
+            with open(index_path) as f:
+                index = json.load(f)
+            org_uuid = index.get("org_id")
+
+            if not org_uuid:
+                log.error("No org_id in index.json. Please re-sync to update local state.")
+                raise typer.Exit(1)
+
+            # Fetch remote status
+            log.info("Authenticating and fetching remote state...")
+            cookies = get_session_cookies(browser.value)
+            session = create_session(cookies)
+
+            # Load sync state for detailed comparison
+            state = load_sync_state(output)
+
+            remote_status = fetch_remote_status(session, org_uuid, status_data, state)
+            format_remote_status(status_data, remote_status)
+        else:
+            format_local_status(status_data)
+
+    except CookieExtractionError as e:
+        log.error(f"Cookie extraction failed:\n{e}")
+        raise typer.Exit(1)
+    except SessionExpiredError as e:
+        log.error(f"Session error:\n{e}")
+        raise typer.Exit(1)
+    except APIError as e:
+        log.error(f"API error:\n{e}")
+        raise typer.Exit(1)
     except Exception as e:
         log.error(f"Failed to load status: {e}")
         raise typer.Exit(1)
