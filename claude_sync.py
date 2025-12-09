@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Optional
 
 import typer
 
@@ -43,8 +43,10 @@ SUPPORTED_BROWSERS = ["edge", "chrome"]
 
 class Browser(str, Enum):
     """Supported browsers for cookie extraction."""
+
     edge = "edge"
     chrome = "chrome"
+
 
 # Size limits to prevent memory exhaustion
 MAX_DOC_SIZE_MB = 10  # Skip docs larger than 10MB
@@ -163,7 +165,7 @@ def acquire_lock(output_dir: Path) -> int:
                 f"  1. Check if any claude-sync processes are running:\n"
                 f"     ps aux | grep claude-sync\n"
                 f"  2. If no processes are found, remove the stale lock file:\n"
-                f"     rm \"{lock_path}\"\n"
+                f'     rm "{lock_path}"\n'
                 f"  3. Run claude-sync again"
             )
 
@@ -197,9 +199,13 @@ class Config:
     list_orgs: bool = False
     full_sync: bool = False  # Force full sync, ignore cached state
     auto_commit: bool = True  # Auto git-init and commit after sync
-    project_filter: str | None = None  # Filter to single project (UUID or name substring)
+    project_filter: str | None = (
+        None  # Filter to single project (UUID or name substring)
+    )
     min_disk_mb: int = 100  # Minimum required disk space in MB
-    include_standalone: bool = False  # Include standalone conversations (not in projects)
+    include_standalone: bool = (
+        False  # Include standalone conversations (not in projects)
+    )
 
 
 def get_config_from_env() -> dict:
@@ -239,15 +245,16 @@ def sanitize_sensitive_data(text: str) -> str:
     - Anything that looks like a secret
     """
     import re
+
     # Redact sessionKey specifically
     text = re.sub(
         r'(sessionKey["\']?\s*[:=]\s*["\']?)[a-zA-Z0-9_-]{20,}',
-        r'\1[REDACTED]',
+        r"\1[REDACTED]",
         text,
-        flags=re.IGNORECASE
+        flags=re.IGNORECASE,
     )
     # Redact any very long alphanumeric strings (likely tokens)
-    text = re.sub(r'\b[a-zA-Z0-9_-]{50,}\b', '[REDACTED-TOKEN]', text)
+    text = re.sub(r"\b[a-zA-Z0-9_-]{50,}\b", "[REDACTED-TOKEN]", text)
     return text
 
 
@@ -264,7 +271,7 @@ def parse_timestamp(ts: str | None) -> datetime | None:
         return None
     try:
         # Handle 'Z' suffix (Zulu time = UTC)
-        return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         return None
 
@@ -521,14 +528,16 @@ def _api_request(
             # Check for server errors - RETRY these
             if response.status_code >= 500:
                 if attempt < retries - 1:
-                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    wait_time = 2**attempt  # Exponential backoff: 1s, 2s, 4s
                     status_hints = {
                         502: "Bad Gateway - Claude.ai may be updating",
                         503: "Service Unavailable - server overloaded",
                         504: "Gateway Timeout - request took too long",
                     }
                     hint = status_hints.get(response.status_code, "Server error")
-                    log.warning(f"{hint} ({response.status_code}), retrying in {wait_time}s...")
+                    log.warning(
+                        f"{hint} ({response.status_code}), retrying in {wait_time}s..."
+                    )
                     time.sleep(wait_time)
                     continue  # Retry the loop
                 raise APIError(
@@ -540,10 +549,13 @@ def _api_request(
             response.raise_for_status()
 
             # Validate content type
-            content_type = response.headers.get('content-type', '')
-            if 'application/json' not in content_type:
+            content_type = response.headers.get("content-type", "")
+            if "application/json" not in content_type:
                 body_preview = response.text[:500]
-                if '<html' in body_preview.lower() or '<!doctype' in body_preview.lower():
+                if (
+                    "<html" in body_preview.lower()
+                    or "<!doctype" in body_preview.lower()
+                ):
                     raise APIError(
                         "API returned HTML instead of JSON.\n"
                         "This usually means Cloudflare blocked the request.\n"
@@ -572,8 +584,7 @@ def _api_request(
             error_str = str(e).lower()
             if "timeout" in error_str:
                 last_error = APIError(
-                    "Request timed out.\n"
-                    "Check your internet connection and try again."
+                    "Request timed out.\nCheck your internet connection and try again."
                 )
             else:
                 last_error = APIError(f"Connection error: {e}")
@@ -631,7 +642,9 @@ def fetch_projects(session: "requests.Session", org_uuid: str) -> list[dict]:
     projects = _api_request(session, url)
 
     if not isinstance(projects, list):
-        raise APIError(f"Unexpected response format: expected list, got {type(projects)}")
+        raise APIError(
+            f"Unexpected response format: expected list, got {type(projects)}"
+        )
 
     log.debug(f"Fetched {len(projects)} projects")
     return projects
@@ -654,7 +667,9 @@ def fetch_project_details(
     project = _api_request(session, url)
 
     if not isinstance(project, dict):
-        raise APIError(f"Unexpected response format: expected dict, got {type(project)}")
+        raise APIError(
+            f"Unexpected response format: expected dict, got {type(project)}"
+        )
 
     return project
 
@@ -767,7 +782,8 @@ def fetch_standalone_conversations(
 
     # Filter out conversations that belong to projects
     standalone = [
-        c for c in all_convos
+        c
+        for c in all_convos
         if not c.get("project_uuid") or c.get("project_uuid") not in project_uuids
     ]
 
@@ -840,7 +856,7 @@ def sanitize_filename(name: str, max_len: int = 200) -> str:
     # Truncate with hash if too long
     if len(name) > max_len:
         hash_suffix = hashlib.md5(name.encode()).hexdigest()[:8]
-        name = f"{name[:max_len - 10]}_{hash_suffix}"
+        name = f"{name[: max_len - 10]}_{hash_suffix}"
 
     # Ensure non-empty
     return name or "unnamed"
@@ -879,6 +895,7 @@ def get_unique_filename(
     Returns:
         Unique filename, possibly with numeric suffix
     """
+
     # Comparison function based on case sensitivity
     def normalize(s: str) -> str:
         return s.lower() if case_insensitive else s
@@ -950,19 +967,19 @@ def backup_file(file_path: Path, backup_dir: Path, max_backups: int = 5) -> Path
         return None
 
     backup_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    backup_path = backup_dir / f'{file_path.name}.{timestamp}.bak'
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = backup_dir / f"{file_path.name}.{timestamp}.bak"
 
     shutil.copy2(file_path, backup_path)
-    log.debug(f'Backed up: {file_path.name} -> {backup_path.name}')
+    log.debug(f"Backed up: {file_path.name} -> {backup_path.name}")
 
     # Rotate old backups
-    pattern = f'{file_path.name}.*.bak'
+    pattern = f"{file_path.name}.*.bak"
     existing = sorted(backup_dir.glob(pattern), key=lambda p: p.stat().st_mtime)
     while len(existing) > max_backups:
         oldest = existing.pop(0)
         oldest.unlink()
-        log.debug(f'Removed old backup: {oldest.name}')
+        log.debug(f"Removed old backup: {oldest.name}")
 
     return backup_path
 
@@ -981,21 +998,19 @@ def atomic_write_json(path: Path, data: dict) -> None:
 
     # Create temp file in same directory (ensures same filesystem for atomic rename)
     fd, tmp_path = tempfile.mkstemp(
-        dir=path.parent,
-        prefix=f'.{path.name}.',
-        suffix='.tmp'
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
     )
     tmp = Path(tmp_path)
 
     try:
-        with os.fdopen(fd, 'w') as f:
+        with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
             f.flush()
             os.fsync(f.fileno())  # Ensure written to disk
 
         # Atomic rename (POSIX guarantees atomicity)
         tmp.replace(path)
-    except (OSError, TypeError, ValueError) as e:
+    except (OSError, TypeError, ValueError):
         # OSError: file I/O errors (permissions, disk full, etc.)
         # TypeError/ValueError: json.dump errors (non-serializable data)
         # Clean up temp file on error, then re-raise
@@ -1078,7 +1093,7 @@ def write_project_output(
                     f"\n"
                     f"Recovery steps:\n"
                     f"  1. Manually rename the conflicting directory:\n"
-                    f"     mv \"{collision_dir}\" \"{collision_dir}-old\"\n"
+                    f'     mv "{collision_dir}" "{collision_dir}-old"\n'
                     f"  2. Run claude-sync again\n"
                     f"\n"
                     f"Alternatively, rename one of the projects on claude.ai to avoid the collision."
@@ -1149,10 +1164,12 @@ _No project instructions defined._
 
             # Check doc size before processing
             content = doc.get("content", "")
-            content_size_mb = len(content.encode('utf-8')) / (1024 * 1024)
+            content_size_mb = len(content.encode("utf-8")) / (1024 * 1024)
             if content_size_mb > MAX_DOC_SIZE_MB:
                 doc_filename = doc.get("file_name") or doc.get("filename") or "unknown"
-                log.warning(f"Skipping doc '{doc_filename}': {content_size_mb:.1f}MB exceeds {MAX_DOC_SIZE_MB}MB limit")
+                log.warning(
+                    f"Skipping doc '{doc_filename}': {content_size_mb:.1f}MB exceeds {MAX_DOC_SIZE_MB}MB limit"
+                )
                 continue
 
             # API uses 'file_name' key
@@ -1175,9 +1192,13 @@ _No project instructions defined._
                     old_doc_path = docs_dir / prev_safe
                     # Validate path doesn't escape docs directory
                     if not validate_path_within_directory(old_doc_path, docs_dir):
-                        log.warning(f"Skipping suspicious filename in state: {prev_filename}")
+                        log.warning(
+                            f"Skipping suspicious filename in state: {prev_filename}"
+                        )
                     elif old_doc_path.exists():
-                        log.info(f"Doc renamed: '{prev_filename}' -> '{doc_filename}', removing old file")
+                        log.info(
+                            f"Doc renamed: '{prev_filename}' -> '{doc_filename}', removing old file"
+                        )
                         old_doc_path.unlink()
 
             # Write doc content (already extracted for size check)
@@ -1199,7 +1220,9 @@ _No project instructions defined._
                     old_doc_path = docs_dir / prev_safe
                     # Validate path doesn't escape docs directory
                     if not validate_path_within_directory(old_doc_path, docs_dir):
-                        log.warning(f"Skipping suspicious filename in state: {prev_filename}")
+                        log.warning(
+                            f"Skipping suspicious filename in state: {prev_filename}"
+                        )
                         continue
                     if old_doc_path.exists():
                         old_doc_path.unlink()
@@ -1215,8 +1238,9 @@ def write_index(
     synced_at: str,
     orphaned_projects: list[dict] | None = None,
     standalone_count: int = 0,
+    org_name: str = "Unknown",
 ) -> None:
-    """Write index.json manifest file.
+    """Write index.json manifest file with multi-org support.
 
     Args:
         projects: List of project dicts (with 'docs_count' added)
@@ -1225,19 +1249,55 @@ def write_index(
         synced_at: ISO timestamp of sync
         orphaned_projects: List of projects deleted remotely but kept locally
         standalone_count: Number of standalone conversations synced
+        org_name: Organization name (from bootstrap API)
     """
-    index = {
-        "synced_at": synced_at,
-        "org_id": org_uuid,
-        "projects": {},
-    }
+    index_path = output_dir / "index.json"
 
+    # Read existing index if it exists
+    existing_index = {}
+    if index_path.exists():
+        try:
+            with open(index_path) as f:
+                existing_index = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            log.warning("Could not read existing index.json, starting fresh")
+            existing_index = {}
+
+    # Check if existing index is old format (has org_id at root)
+    if existing_index and "org_id" in existing_index and "orgs" not in existing_index:
+        log.info("Migrating index.json from old format to multi-org format")
+        # Migrate old format to new format
+        old_org_id = existing_index.get("org_id")
+        old_synced_at = existing_index.get("synced_at")
+        old_projects = existing_index.get("projects", {})
+        old_standalone = existing_index.get("standalone_conversations", {})
+
+        existing_index = {
+            "orgs": {
+                old_org_id: {
+                    "name": "Unknown",  # Can't recover old org name
+                    "synced_at": old_synced_at,
+                    "projects": old_projects,
+                }
+            }
+        }
+        if old_standalone:
+            existing_index["orgs"][old_org_id]["standalone_conversations"] = (
+                old_standalone
+            )
+
+    # Initialize orgs structure if not present
+    if "orgs" not in existing_index:
+        existing_index = {"orgs": {}}
+
+    # Build current org data
+    projects_dict = {}
     for project in projects:
         project_uuid = project["uuid"]
         project_name = project.get("name", "Unnamed Project")
         project_slug = make_project_slug(project_name, project_uuid)
 
-        index["projects"][project_uuid] = {
+        projects_dict[project_uuid] = {
             "name": project_name,
             "slug": project_slug,
             "path": f"{project_slug}/",
@@ -1252,7 +1312,7 @@ def write_index(
             orphan_name = orphan.get("name", "Unknown")
             orphan_slug = make_project_slug(orphan_name, orphan_uuid)
 
-            index["projects"][orphan_uuid] = {
+            projects_dict[orphan_uuid] = {
                 "name": orphan_name,
                 "slug": orphan_slug,
                 "path": f"{orphan_slug}/",
@@ -1260,15 +1320,25 @@ def write_index(
                 "orphaned_at": orphan.get("_orphaned_at"),
             }
 
+    # Build current org entry
+    org_data = {
+        "name": org_name,
+        "synced_at": synced_at,
+        "projects": projects_dict,
+    }
+
     # Add standalone conversations section if any
     if standalone_count > 0:
-        index["standalone_conversations"] = {
+        org_data["standalone_conversations"] = {
             "count": standalone_count,
             "path": "_standalone/",
         }
 
-    index_path = output_dir / "index.json"
-    atomic_write_json(index_path, index)
+    # Merge current org data into existing index
+    existing_index["orgs"][org_uuid] = org_data
+
+    # Write updated index
+    atomic_write_json(index_path, existing_index)
     log.info(f"Wrote {index_path}")
 
 
@@ -1387,12 +1457,14 @@ def project_needs_sync(
 
         prev_doc = prev_docs.get(doc_uuid, {})
         if prev_doc.get("hash") != current_hash:
-            return True, f"doc content changed"
+            return True, "doc content changed"
 
     return False, "unchanged"
 
 
-def detect_deleted_projects(prev_state: dict, current_projects: list[dict]) -> list[str]:
+def detect_deleted_projects(
+    prev_state: dict, current_projects: list[dict]
+) -> list[str]:
     """Detect projects that were deleted remotely.
 
     Args:
@@ -1468,7 +1540,9 @@ def conversation_needs_sync(
     return False, "unchanged"
 
 
-def write_conversation_index(project_dir: Path, convo_index: dict, synced_at: str) -> None:
+def write_conversation_index(
+    project_dir: Path, convo_index: dict, synced_at: str
+) -> None:
     """Write conversations/index.json manifest.
 
     Args:
@@ -1539,7 +1613,9 @@ def format_conversation_markdown(conversation: dict) -> str:
                         # Include thinking blocks in collapsed format
                         thinking_text = block.get("thinking", "")
                         if thinking_text:
-                            content_parts.append(f"<details>\n<summary>Thinking...</summary>\n\n{thinking_text}\n</details>")
+                            content_parts.append(
+                                f"<details>\n<summary>Thinking...</summary>\n\n{thinking_text}\n</details>"
+                            )
         content = "\n\n".join(filter(None, content_parts))
 
         # Fallback to legacy 'text' field if content array is empty
@@ -1622,7 +1698,9 @@ def write_conversation_output(
             if not validate_path_within_directory(old_convo_path, convos_dir):
                 log.warning(f"Skipping suspicious filename in state: {prev_filename}")
             elif old_convo_path.exists():
-                log.info(f"Conversation renamed: '{prev_filename}' -> '{filename}', removing old file")
+                log.info(
+                    f"Conversation renamed: '{prev_filename}' -> '{filename}', removing old file"
+                )
                 old_convo_path.unlink()
 
     # Format and write file
@@ -1683,7 +1761,9 @@ def write_standalone_conversation(
             if not validate_path_within_directory(old_convo_path, standalone_dir):
                 log.warning(f"Skipping suspicious filename in state: {prev_filename}")
             elif old_convo_path.exists():
-                log.info(f"Standalone conversation renamed: '{prev_filename}' -> '{filename}'")
+                log.info(
+                    f"Standalone conversation renamed: '{prev_filename}' -> '{filename}'"
+                )
                 old_convo_path.unlink()
 
     # Format and write file
@@ -1806,6 +1886,349 @@ def check_disk_space(output_dir: Path, min_mb: int = 100) -> None:
 # =============================================================================
 
 
+def sync_conversations(
+    session: "requests.Session",
+    project_uuid: str,
+    project_name: str,
+    project_dir: Path,
+    org_uuid: str,
+    config: Config,
+    prev_state: dict,
+    synced_at: str,
+    metrics: dict,
+) -> dict:
+    """Sync conversations for a project.
+
+    Args:
+        session: Authenticated requests session
+        project_uuid: Project UUID
+        project_name: Project name (for logging)
+        project_dir: Project directory path
+        org_uuid: Organization UUID
+        config: Runtime configuration
+        prev_state: Previous sync state
+        synced_at: ISO timestamp of sync
+        metrics: Metrics tracking dict (updated in place)
+
+    Returns:
+        Dict mapping conversation UUID to conversation metadata
+    """
+    convo_list = fetch_project_conversations(session, org_uuid, project_uuid)
+    if not convo_list:
+        return {}
+
+    # Get previous conversation state for incremental sync
+    prev_project_state = prev_state.get("projects", {}).get(project_uuid, {})
+    prev_convos = prev_project_state.get("conversations", {})
+
+    convos_synced = 0
+    convos_skipped = 0
+    used_convo_filenames: set[str] = set()
+    convo_index: dict[str, dict] = {}
+
+    for convo_meta in convo_list:
+        convo_uuid = convo_meta.get("uuid")
+        if not convo_uuid:
+            continue
+
+        # Check if conversation needs sync (incremental)
+        convo_needs_sync, convo_reason = conversation_needs_sync(
+            convo_meta, prev_convos, config.full_sync
+        )
+
+        if convo_needs_sync:
+            try:
+                # Ensure project directory exists before writing conversations
+                project_dir.mkdir(parents=True, exist_ok=True)
+
+                full_convo = fetch_conversation(session, org_uuid, convo_uuid)
+
+                # Check conversation size before processing
+                message_count = len(full_convo.get("chat_messages", []))
+                if message_count > MAX_CONVERSATION_MESSAGES:
+                    log.warning(
+                        f"Skipping conversation '{convo_meta.get('name')}': {message_count} messages exceeds {MAX_CONVERSATION_MESSAGES} limit"
+                    )
+                    convos_skipped += 1
+                    continue
+
+                filename = write_conversation_output(
+                    full_convo, project_dir, used_convo_filenames, prev_convos
+                )
+                if filename:
+                    convo_index[convo_uuid] = {
+                        "name": convo_meta.get("name", "Untitled"),
+                        "filename": filename,
+                        "created_at": convo_meta.get("created_at"),
+                        "updated_at": convo_meta.get("updated_at"),
+                        "message_count": len(full_convo.get("chat_messages", [])),
+                    }
+                    convos_synced += 1
+                    metrics["conversations_synced"] += 1
+            except (APIError, FileNotFoundError) as e:
+                log.warning(f"Failed to fetch conversation {convo_uuid}: {e}")
+        else:
+            # Keep previous index entry for unchanged conversations
+            if convo_uuid in prev_convos:
+                convo_index[convo_uuid] = prev_convos[convo_uuid]
+            convos_skipped += 1
+            metrics["conversations_skipped"] += 1
+
+    # Detect deleted conversations
+    current_convo_uuids = {c.get("uuid") for c in convo_list}
+    conversations_dir = project_dir / "conversations"
+    for prev_uuid, prev_data in prev_convos.items():
+        if prev_uuid not in current_convo_uuids:
+            # Conversation was deleted remotely
+            prev_filename = prev_data.get("filename", "")
+            if prev_filename:
+                old_file = conversations_dir / prev_filename
+                # Validate path doesn't escape conversations directory
+                if not validate_path_within_directory(old_file, conversations_dir):
+                    log.warning(
+                        f"Skipping suspicious filename in state: {prev_filename}"
+                    )
+                    continue
+                if old_file.exists():
+                    old_file.unlink()
+                    log.info(f"Deleted orphaned conversation: {prev_filename}")
+
+    # Write conversation index
+    if convo_index:
+        project_dir.mkdir(parents=True, exist_ok=True)
+        write_conversation_index(project_dir, convo_index, synced_at)
+
+    if convos_skipped > 0:
+        log.debug(f"Conversations: {convos_synced} synced, {convos_skipped} skipped")
+    elif convos_synced > 0:
+        log.debug(f"Conversations: {convos_synced} synced")
+
+    return convo_index
+
+
+def sync_standalone_conversations(
+    session: "requests.Session",
+    org_uuid: str,
+    project_uuids: set[str],
+    output_dir: Path,
+    config: Config,
+    prev_state: dict,
+    synced_at: str,
+    metrics: dict,
+) -> dict:
+    """Sync standalone conversations (not associated with any project).
+
+    Args:
+        session: Authenticated requests session
+        org_uuid: Organization UUID
+        project_uuids: Set of project UUIDs to exclude
+        output_dir: Base output directory
+        config: Runtime configuration
+        prev_state: Previous sync state
+        synced_at: ISO timestamp of sync
+        metrics: Metrics tracking dict (updated in place)
+
+    Returns:
+        Dict mapping standalone conversation UUID to metadata
+    """
+    # Get all project UUIDs to filter them out
+    standalone_convos = fetch_standalone_conversations(session, org_uuid, project_uuids)
+    log.info(f"Found {len(standalone_convos)} standalone conversations")
+
+    # Get previous standalone state
+    prev_standalone = prev_state.get("standalone_conversations", {})
+
+    # Track synced conversations
+    standalone_index: dict[str, dict] = {}
+    used_standalone_filenames: set[str] = set()
+
+    for convo_meta in standalone_convos:
+        if _interrupted:
+            log.info("Stopping standalone sync early due to interrupt")
+            break
+
+        convo_uuid = convo_meta.get("uuid")
+        if not convo_uuid:
+            continue
+
+        # Check if conversation needs sync
+        needs_sync, reason = conversation_needs_sync(
+            convo_meta, prev_standalone, config.full_sync
+        )
+
+        if needs_sync:
+            try:
+                # Fetch full conversation
+                full_convo = fetch_conversation(session, org_uuid, convo_uuid)
+
+                # Check conversation size
+                message_count = len(full_convo.get("chat_messages", []))
+                if message_count > MAX_CONVERSATION_MESSAGES:
+                    log.warning(
+                        f"Skipping standalone conversation '{convo_meta.get('name')}': {message_count} messages exceeds {MAX_CONVERSATION_MESSAGES} limit"
+                    )
+                    metrics["standalone_skipped"] += 1
+                    continue
+
+                # Write conversation
+                filename = write_standalone_conversation(
+                    full_convo, output_dir, used_standalone_filenames, prev_standalone
+                )
+                if filename:
+                    standalone_index[convo_uuid] = {
+                        "filename": filename,
+                        "updated_at": convo_meta.get("updated_at"),
+                    }
+                    metrics["standalone_synced"] += 1
+            except (APIError, FileNotFoundError) as e:
+                log.warning(
+                    f"Failed to fetch standalone conversation {convo_uuid}: {e}"
+                )
+                metrics["standalone_skipped"] += 1
+        else:
+            # Keep previous index entry for unchanged conversations
+            if convo_uuid in prev_standalone:
+                standalone_index[convo_uuid] = prev_standalone[convo_uuid]
+            metrics["standalone_skipped"] += 1
+
+    # Detect deleted standalone conversations
+    current_standalone_uuids = {c.get("uuid") for c in standalone_convos}
+    standalone_dir = output_dir / "_standalone"
+    for prev_uuid, prev_data in prev_standalone.items():
+        if prev_uuid not in current_standalone_uuids:
+            # Conversation was deleted remotely
+            prev_filename = prev_data.get("filename", "")
+            if prev_filename:
+                old_file = standalone_dir / prev_filename
+                # Validate path doesn't escape standalone directory
+                if not validate_path_within_directory(old_file, standalone_dir):
+                    log.warning(
+                        f"Skipping suspicious filename in state: {prev_filename}"
+                    )
+                    continue
+                if old_file.exists():
+                    old_file.unlink()
+                    log.info(
+                        f"Deleted orphaned standalone conversation: {prev_filename}"
+                    )
+
+    if metrics["standalone_synced"] > 0 or metrics["standalone_skipped"] > 0:
+        log.info(
+            f"Standalone conversations: {metrics['standalone_synced']} synced, {metrics['standalone_skipped']} skipped"
+        )
+
+    return standalone_index
+
+
+def sync_project(
+    session: "requests.Session",
+    project: dict,
+    project_dir: Path,
+    org_uuid: str,
+    config: Config,
+    prev_state: dict,
+    new_state: dict,
+    synced_at: str,
+    metrics: dict,
+    prev_failed: dict,
+) -> tuple[bool, dict | None]:
+    """Sync a single project including metadata, docs, and conversations.
+
+    Args:
+        session: Authenticated requests session
+        project: Project metadata dict
+        project_dir: Project directory path
+        org_uuid: Organization UUID
+        config: Runtime configuration
+        prev_state: Previous sync state
+        new_state: New sync state (updated in place)
+        synced_at: ISO timestamp of sync
+        metrics: Metrics tracking dict (updated in place)
+        prev_failed: Dict of previously failed projects
+
+    Returns:
+        Tuple of (success: bool, full_project: dict | None)
+        full_project is None if sync failed
+    """
+    project_uuid = project["uuid"]
+    project_name = project.get("name", "Unknown")
+
+    log.debug(f"Processing: {project_name}")
+
+    # Track that we checked this project
+    metrics["projects_checked"] += 1
+
+    try:
+        # Fetch full project details (includes prompt_template)
+        full_project = fetch_project_details(session, org_uuid, project_uuid)
+
+        # Fetch docs
+        docs = fetch_project_docs(session, org_uuid, project_uuid)
+        full_project["_docs_count"] = len(docs)
+
+        # Check if sync needed (incremental)
+        needs_sync, reason = project_needs_sync(full_project, docs, prev_state)
+
+        # Track if we actually synced anything for this project
+        project_synced = False
+
+        # Sync project metadata and docs if needed
+        if needs_sync or config.full_sync:
+            log.debug(f"Syncing {project_name}: {reason}")
+            project_dir = write_project_output(
+                full_project, docs, config.output_dir, prev_state
+            )
+            project_synced = True
+
+        # Sync conversations independently (always check unless --skip-conversations)
+        # Conversations don't update project.updated_at, so we need to check them separately
+        if not config.skip_conversations:
+            convo_index = sync_conversations(
+                session,
+                project_uuid,
+                project_name,
+                project_dir,
+                org_uuid,
+                config,
+                prev_state,
+                synced_at,
+                metrics,
+            )
+            if convo_index:
+                project_synced = True
+                full_project["_conversations"] = convo_index
+
+        # Update counters
+        if project_synced:
+            metrics["projects_synced"] += 1
+        else:
+            log.debug(f"Skipping {project_name}: {reason}")
+            metrics["projects_skipped"] += 1
+
+        # Build state for this project (always update state)
+        new_state["projects"][project_uuid] = build_project_state(full_project, docs)
+
+        # Clear from failed projects if it was previously failed
+        if project_uuid in prev_failed:
+            log.debug(f"Successfully synced previously failed project: {project_name}")
+
+        return True, full_project
+
+    except Exception as e:
+        # Intentionally broad: catch any error in project sync and continue
+        # with other projects rather than failing the entire sync
+        error_msg = str(e)
+        log.error(f"Failed to sync project '{project_name}': {error_msg}")
+        if config.verbose:
+            import traceback
+
+            tb = traceback.format_exc()
+            log.error(sanitize_sensitive_data(tb))
+
+        # Return False to indicate failure
+        return False, None
+
+
 def sync(config: Config) -> int:
     """Execute sync operation.
 
@@ -1821,6 +2244,7 @@ def sync(config: Config) -> int:
 
     # Set up signal handlers for graceful interruption
     import signal
+
     signal.signal(signal.SIGINT, _handle_interrupt)
     signal.signal(signal.SIGTERM, _handle_interrupt)
     global _interrupted
@@ -1858,14 +2282,14 @@ def sync(config: Config) -> int:
     # Initialize metrics tracking
     start_time = time.time()
     metrics = {
-        'projects_checked': 0,
-        'projects_synced': 0,
-        'projects_skipped': 0,
-        'conversations_synced': 0,
-        'conversations_skipped': 0,
-        'orphaned_projects': 0,
-        'standalone_synced': 0,
-        'standalone_skipped': 0,
+        "projects_checked": 0,
+        "projects_synced": 0,
+        "projects_skipped": 0,
+        "conversations_synced": 0,
+        "conversations_skipped": 0,
+        "orphaned_projects": 0,
+        "standalone_synced": 0,
+        "standalone_skipped": 0,
     }
 
     try:
@@ -1876,6 +2300,17 @@ def sync(config: Config) -> int:
         # Step 2: Create authenticated session
         session = create_session(cookies)
 
+        # Step 2.5: Fetch org name from bootstrap
+        org_name = "Unknown"
+        try:
+            orgs = discover_organizations(session)
+            for org in orgs:
+                if org["uuid"] == org_uuid:
+                    org_name = org["name"]
+                    break
+        except Exception as e:
+            log.warning(f"Could not fetch org name: {e}")
+
         # Step 3: Fetch projects
         log.info("Fetching projects...")
         projects = fetch_projects(session, org_uuid)
@@ -1885,8 +2320,10 @@ def sync(config: Config) -> int:
         if config.project_filter:
             filter_str = config.project_filter.lower()
             filtered = [
-                p for p in projects
-                if filter_str in p["uuid"].lower() or filter_str in p.get("name", "").lower()
+                p
+                for p in projects
+                if filter_str in p["uuid"].lower()
+                or filter_str in p.get("name", "").lower()
             ]
             if not filtered:
                 log.error(f"No project matches filter '{config.project_filter}'")
@@ -1895,7 +2332,9 @@ def sync(config: Config) -> int:
                     log.info(f"  {p['uuid'][:8]}  {p.get('name', 'Unknown')}")
                 return 1
             if len(filtered) > 1:
-                log.warning(f"Filter '{config.project_filter}' matched {len(filtered)} projects:")
+                log.warning(
+                    f"Filter '{config.project_filter}' matched {len(filtered)} projects:"
+                )
                 for p in filtered:
                     log.warning(f"  {p['uuid'][:8]}  {p.get('name', 'Unknown')}")
             projects = filtered
@@ -1913,15 +2352,15 @@ def sync(config: Config) -> int:
         # Step 5: Process each project
         synced_projects = []
         failed_projects_dict: dict[str, dict] = {}  # uuid -> {name, error, failed_at}
-        synced_count = 0
-        skipped_count = 0
 
         # Log previously failed projects
         prev_failed = prev_state.get("failed_projects", {})
         if prev_failed:
             log.info(f"Retrying {len(prev_failed)} previously failed project(s):")
             for uuid, info in prev_failed.items():
-                log.info(f"  - {info.get('name', uuid[:8])}: {info.get('error', 'unknown error')}")
+                log.info(
+                    f"  - {info.get('name', uuid[:8])}: {info.get('error', 'unknown error')}"
+                )
 
         pbar = tqdm(projects, desc="Syncing projects", unit="project")
         for project in pbar:
@@ -1933,166 +2372,40 @@ def sync(config: Config) -> int:
             project_name = project.get("name", "Unknown")
 
             # Update progress bar with current project name (truncate if too long)
-            display_name = project_name[:30] + "..." if len(project_name) > 30 else project_name
+            display_name = (
+                project_name[:30] + "..." if len(project_name) > 30 else project_name
+            )
             pbar.set_description(f"Syncing: {display_name}")
 
-            log.debug(f"Processing: {project_name}")
+            # Compute project directory deterministically
+            project_slug = make_project_slug(project_name, project_uuid)
+            project_dir = config.output_dir / project_slug
 
-            # Track that we checked this project
-            metrics['projects_checked'] += 1
+            # Sync the project
+            success, full_project = sync_project(
+                session,
+                project,
+                project_dir,
+                org_uuid,
+                config,
+                prev_state,
+                new_state,
+                synced_at,
+                metrics,
+                prev_failed,
+            )
 
-            # Wrap entire project sync in try-except to handle failures gracefully
-            try:
-                # Fetch full project details (includes prompt_template)
-                full_project = fetch_project_details(session, org_uuid, project_uuid)
-
-                # Fetch docs
-                docs = fetch_project_docs(session, org_uuid, project_uuid)
-                full_project["_docs_count"] = len(docs)
-
-                # Check if sync needed (incremental)
-                needs_sync, reason = project_needs_sync(full_project, docs, prev_state)
-
-                # Compute project directory deterministically (needed for conversations)
-                project_slug = make_project_slug(project_name, project_uuid)
-                project_dir = config.output_dir / project_slug
-
-                # Track if we actually synced anything for this project
-                project_synced = False
-
-                # Sync project metadata and docs if needed
-                if needs_sync or config.full_sync:
-                    log.debug(f"Syncing {project_name}: {reason}")
-                    project_dir = write_project_output(full_project, docs, config.output_dir, prev_state)
-                    project_synced = True
-
-                # Sync conversations independently (always check unless --skip-conversations)
-                # Conversations don't update project.updated_at, so we need to check them separately
-                if not config.skip_conversations:
-                    convo_list = fetch_project_conversations(session, org_uuid, project_uuid)
-                    if convo_list:
-                        # Get previous conversation state for incremental sync
-                        prev_project_state = prev_state.get("projects", {}).get(project_uuid, {})
-                        prev_convos = prev_project_state.get("conversations", {})
-
-                        convos_synced = 0
-                        convos_skipped = 0
-                        used_convo_filenames: set[str] = set()
-                        convo_index: dict[str, dict] = {}
-
-                        for convo_meta in convo_list:
-                            convo_uuid = convo_meta.get("uuid")
-                            if not convo_uuid:
-                                continue
-
-                            # Check if conversation needs sync (incremental)
-                            convo_needs_sync, convo_reason = conversation_needs_sync(
-                                convo_meta, prev_convos, config.full_sync
-                            )
-
-                            if convo_needs_sync:
-                                try:
-                                    # Ensure project directory exists before writing conversations
-                                    project_dir.mkdir(parents=True, exist_ok=True)
-
-                                    full_convo = fetch_conversation(session, org_uuid, convo_uuid)
-
-                                    # Check conversation size before processing
-                                    message_count = len(full_convo.get("chat_messages", []))
-                                    if message_count > MAX_CONVERSATION_MESSAGES:
-                                        log.warning(f"Skipping conversation '{convo_meta.get('name')}': {message_count} messages exceeds {MAX_CONVERSATION_MESSAGES} limit")
-                                        convos_skipped += 1
-                                        continue
-
-                                    filename = write_conversation_output(
-                                        full_convo, project_dir, used_convo_filenames, prev_convos
-                                    )
-                                    if filename:
-                                        convo_index[convo_uuid] = {
-                                            "name": convo_meta.get("name", "Untitled"),
-                                            "filename": filename,
-                                            "created_at": convo_meta.get("created_at"),
-                                            "updated_at": convo_meta.get("updated_at"),
-                                            "message_count": len(full_convo.get("chat_messages", [])),
-                                        }
-                                        convos_synced += 1
-                                        metrics['conversations_synced'] += 1
-                                        project_synced = True  # Mark that we synced something
-                                except (APIError, FileNotFoundError) as e:
-                                    log.warning(f"Failed to fetch conversation {convo_uuid}: {e}")
-                            else:
-                                # Keep previous index entry for unchanged conversations
-                                if convo_uuid in prev_convos:
-                                    convo_index[convo_uuid] = prev_convos[convo_uuid]
-                                convos_skipped += 1
-                                metrics['conversations_skipped'] += 1
-
-                        # Detect deleted conversations
-                        current_convo_uuids = {c.get("uuid") for c in convo_list}
-                        conversations_dir = project_dir / "conversations"
-                        for prev_uuid, prev_data in prev_convos.items():
-                            if prev_uuid not in current_convo_uuids:
-                                # Conversation was deleted remotely
-                                prev_filename = prev_data.get("filename", "")
-                                if prev_filename:
-                                    old_file = conversations_dir / prev_filename
-                                    # Validate path doesn't escape conversations directory
-                                    if not validate_path_within_directory(old_file, conversations_dir):
-                                        log.warning(f"Skipping suspicious filename in state: {prev_filename}")
-                                        continue
-                                    if old_file.exists():
-                                        old_file.unlink()
-                                        log.info(f"Deleted orphaned conversation: {prev_filename}")
-
-                        # Write conversation index
-                        if convo_index:
-                            project_dir.mkdir(parents=True, exist_ok=True)
-                            write_conversation_index(project_dir, convo_index, synced_at)
-
-                        if convos_skipped > 0:
-                            log.debug(f"Conversations: {convos_synced} synced, {convos_skipped} skipped")
-                        elif convos_synced > 0:
-                            log.debug(f"Conversations: {convos_synced} synced")
-
-                        # Store conversation state for next sync
-                        full_project["_conversations"] = convo_index
-
-                # Update counters
-                if project_synced:
-                    synced_count += 1
-                    metrics['projects_synced'] += 1
-                else:
-                    log.debug(f"Skipping {project_name}: {reason}")
-                    skipped_count += 1
-                    metrics['projects_skipped'] += 1
-
-                # Build state for this project (always update state)
-                new_state["projects"][project_uuid] = build_project_state(full_project, docs)
+            if success and full_project:
+                # Add to synced projects list
                 synced_projects.append(full_project)
-
-                # Clear from failed projects if it was previously failed
-                if project_uuid in prev_failed:
-                    log.debug(f"Successfully synced previously failed project: {project_name}")
-
-            except Exception as e:
-                # Intentionally broad: catch any error in project sync and continue
-                # with other projects rather than failing the entire sync
-                error_msg = str(e)
-                log.error(f"Failed to sync project '{project_name}': {error_msg}")
-                if config.verbose:
-                    import traceback
-                    tb = traceback.format_exc()
-                    log.error(sanitize_sensitive_data(tb))
-
+            else:
                 # Record failed project in dict with details
+                # sync_project already logged the error
                 failed_projects_dict[project_uuid] = {
                     "name": project_name,
-                    "error": error_msg,
+                    "error": "sync failed",
                     "failed_at": synced_at,
                 }
-
-                # Don't add to synced_projects or new_state - exclude from index.json
-                continue
 
         # Step 6: Detect deleted projects and mark as orphaned
         deleted_uuids = detect_deleted_projects(prev_state, projects)
@@ -2100,14 +2413,18 @@ def sync(config: Config) -> int:
         for deleted_uuid in deleted_uuids:
             prev_project = prev_state.get("projects", {}).get(deleted_uuid, {})
             # Keep the project info but mark as orphaned
-            orphaned_projects.append({
-                "uuid": deleted_uuid,
-                "name": prev_project.get("name", "Unknown"),
-                "_orphaned": True,
-                "_orphaned_at": synced_at,
-            })
-            metrics['orphaned_projects'] += 1
-            log.warning(f"Project '{prev_project.get('name', deleted_uuid)}' deleted remotely (local files kept)")
+            orphaned_projects.append(
+                {
+                    "uuid": deleted_uuid,
+                    "name": prev_project.get("name", "Unknown"),
+                    "_orphaned": True,
+                    "_orphaned_at": synced_at,
+                }
+            )
+            metrics["orphaned_projects"] += 1
+            log.warning(
+                f"Project '{prev_project.get('name', deleted_uuid)}' deleted remotely (local files kept)"
+            )
 
         # Step 6.5: Sync standalone conversations if requested
         standalone_conversation_count = 0
@@ -2117,85 +2434,21 @@ def sync(config: Config) -> int:
                 # Get all project UUIDs to filter them out
                 project_uuids = {p["uuid"] for p in projects}
 
-                # Fetch standalone conversations
-                standalone_convos = fetch_standalone_conversations(session, org_uuid, project_uuids)
-                log.info(f"Found {len(standalone_convos)} standalone conversations")
-
-                # Get previous standalone state
-                prev_standalone = prev_state.get("standalone_conversations", {})
-
-                # Track synced conversations
-                standalone_index: dict[str, dict] = {}
-                used_standalone_filenames: set[str] = set()
-
-                for convo_meta in standalone_convos:
-                    if _interrupted:
-                        log.info("Stopping standalone sync early due to interrupt")
-                        break
-
-                    convo_uuid = convo_meta.get("uuid")
-                    if not convo_uuid:
-                        continue
-
-                    # Check if conversation needs sync
-                    needs_sync, reason = conversation_needs_sync(
-                        convo_meta, prev_standalone, config.full_sync
-                    )
-
-                    if needs_sync:
-                        try:
-                            # Fetch full conversation
-                            full_convo = fetch_conversation(session, org_uuid, convo_uuid)
-
-                            # Check conversation size
-                            message_count = len(full_convo.get("chat_messages", []))
-                            if message_count > MAX_CONVERSATION_MESSAGES:
-                                log.warning(f"Skipping standalone conversation '{convo_meta.get('name')}': {message_count} messages exceeds {MAX_CONVERSATION_MESSAGES} limit")
-                                metrics['standalone_skipped'] += 1
-                                continue
-
-                            # Write conversation
-                            filename = write_standalone_conversation(
-                                full_convo, config.output_dir, used_standalone_filenames, prev_standalone
-                            )
-                            if filename:
-                                standalone_index[convo_uuid] = {
-                                    "filename": filename,
-                                    "updated_at": convo_meta.get("updated_at"),
-                                }
-                                metrics['standalone_synced'] += 1
-                        except (APIError, FileNotFoundError) as e:
-                            log.warning(f"Failed to fetch standalone conversation {convo_uuid}: {e}")
-                            metrics['standalone_skipped'] += 1
-                    else:
-                        # Keep previous index entry for unchanged conversations
-                        if convo_uuid in prev_standalone:
-                            standalone_index[convo_uuid] = prev_standalone[convo_uuid]
-                        metrics['standalone_skipped'] += 1
-
-                # Detect deleted standalone conversations
-                current_standalone_uuids = {c.get("uuid") for c in standalone_convos}
-                standalone_dir = config.output_dir / "_standalone"
-                for prev_uuid, prev_data in prev_standalone.items():
-                    if prev_uuid not in current_standalone_uuids:
-                        # Conversation was deleted remotely
-                        prev_filename = prev_data.get("filename", "")
-                        if prev_filename:
-                            old_file = standalone_dir / prev_filename
-                            # Validate path doesn't escape standalone directory
-                            if not validate_path_within_directory(old_file, standalone_dir):
-                                log.warning(f"Skipping suspicious filename in state: {prev_filename}")
-                                continue
-                            if old_file.exists():
-                                old_file.unlink()
-                                log.info(f"Deleted orphaned standalone conversation: {prev_filename}")
+                # Sync standalone conversations
+                standalone_index = sync_standalone_conversations(
+                    session,
+                    org_uuid,
+                    project_uuids,
+                    config.output_dir,
+                    config,
+                    prev_state,
+                    synced_at,
+                    metrics,
+                )
 
                 # Store standalone state for next sync
                 new_state["standalone_conversations"] = standalone_index
                 standalone_conversation_count = len(standalone_index)
-
-                if metrics['standalone_synced'] > 0 or metrics['standalone_skipped'] > 0:
-                    log.info(f"Standalone conversations: {metrics['standalone_synced']} synced, {metrics['standalone_skipped']} skipped")
 
             except Exception as e:
                 # Intentionally broad: catch any error in standalone sync
@@ -2203,6 +2456,7 @@ def sync(config: Config) -> int:
                 log.error(f"Failed to sync standalone conversations: {e}")
                 if config.verbose:
                     import traceback
+
                     tb = traceback.format_exc()
                     log.error(sanitize_sensitive_data(tb))
 
@@ -2214,7 +2468,15 @@ def sync(config: Config) -> int:
             # Clear failed projects from state if all succeeded
             pass  # Don't add failed_projects key
 
-        write_index(synced_projects, config.output_dir, org_uuid, synced_at, orphaned_projects, standalone_conversation_count)
+        write_index(
+            synced_projects,
+            config.output_dir,
+            org_uuid,
+            synced_at,
+            orphaned_projects,
+            standalone_conversation_count,
+            org_name,
+        )
         save_sync_state(config.output_dir, new_state)
 
         # Step 7: Git auto-commit
@@ -2224,13 +2486,23 @@ def sync(config: Config) -> int:
         # Print metrics summary
         elapsed = time.time() - start_time
         print(f"\nSync complete in {elapsed:.1f}s")
-        print(f"  Projects: {metrics['projects_checked']} checked, {metrics['projects_synced']} synced, {metrics['projects_skipped']} skipped")
+        print(
+            f"  Projects: {metrics['projects_checked']} checked, {metrics['projects_synced']} synced, {metrics['projects_skipped']} skipped"
+        )
         if not config.skip_conversations:
-            print(f"  Conversations: {metrics['conversations_synced']} synced, {metrics['conversations_skipped']} skipped")
-        if config.include_standalone and (metrics['standalone_synced'] > 0 or metrics['standalone_skipped'] > 0):
-            print(f"  Standalone: {metrics['standalone_synced']} synced, {metrics['standalone_skipped']} skipped")
-        if metrics['orphaned_projects'] > 0:
-            print(f"  Orphaned: {metrics['orphaned_projects']} project(s) deleted remotely")
+            print(
+                f"  Conversations: {metrics['conversations_synced']} synced, {metrics['conversations_skipped']} skipped"
+            )
+        if config.include_standalone and (
+            metrics["standalone_synced"] > 0 or metrics["standalone_skipped"] > 0
+        ):
+            print(
+                f"  Standalone: {metrics['standalone_synced']} synced, {metrics['standalone_skipped']} skipped"
+            )
+        if metrics["orphaned_projects"] > 0:
+            print(
+                f"  Orphaned: {metrics['orphaned_projects']} project(s) deleted remotely"
+            )
         print(f"  Output: {config.output_dir}")
 
         # Report failures if any
@@ -2242,7 +2514,9 @@ def sync(config: Config) -> int:
                 # Truncate error message if too long
                 error_short = error if len(error) <= 100 else f"{error[:97]}..."
                 print(f"  - {proj_name}: {error_short}")
-            print("\nFailed projects were excluded from index.json and will be retried on next sync.")
+            print(
+                "\nFailed projects were excluded from index.json and will be retried on next sync."
+            )
             return 1  # Non-zero exit code to indicate partial failure
 
         return 0
@@ -2307,7 +2581,7 @@ def list_organizations(config: Config) -> int:
         print("\nAvailable organizations:")
         for org in orgs:
             print(f"  {org['uuid']}  {org['name']}")
-        print(f"\nUse: ./claude_sync.py <uuid> to sync a specific organization")
+        print("\nUse: ./claude_sync.py <uuid> to sync a specific organization")
 
         return 0
 
@@ -2317,6 +2591,8 @@ def list_organizations(config: Config) -> int:
     except APIError as e:
         log.error(f"API error:\n{e}")
         return 1
+
+
 @app.command(name="sync")
 def sync_command(
     org_uuid: Annotated[
@@ -2332,23 +2608,40 @@ def sync_command(
     ] = False,
     output: Annotated[
         Path,
-        typer.Option("-o", "--output", help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})"),
+        typer.Option(
+            "-o", "--output", help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})"
+        ),
     ] = DEFAULT_OUTPUT_DIR,
     browser: Annotated[
         Browser,
-        typer.Option("-b", "--browser", help="Browser to extract cookies from (default: edge)", case_sensitive=False),
+        typer.Option(
+            "-b",
+            "--browser",
+            help="Browser to extract cookies from (default: edge)",
+            case_sensitive=False,
+        ),
     ] = Browser.edge,
     skip_conversations: Annotated[
         bool,
-        typer.Option("--skip-conversations", help="Skip syncing project conversations (faster sync)"),
+        typer.Option(
+            "--skip-conversations",
+            help="Skip syncing project conversations (faster sync)",
+        ),
     ] = False,
     include_standalone: Annotated[
         bool,
-        typer.Option("--include-standalone", help="Include standalone conversations (not in projects)"),
+        typer.Option(
+            "--include-standalone",
+            help="Include standalone conversations (not in projects)",
+        ),
     ] = False,
     project: Annotated[
         Optional[str],
-        typer.Option("-p", "--project", help="Sync only this project (UUID or name substring match)"),
+        typer.Option(
+            "-p",
+            "--project",
+            help="Sync only this project (UUID or name substring match)",
+        ),
     ] = None,
     full: Annotated[
         bool,
@@ -2364,7 +2657,11 @@ def sync_command(
     ] = False,
     min_disk_mb: Annotated[
         int,
-        typer.Option("--min-disk-mb", help="Minimum free disk space in MB (default: 100)", metavar="MB"),
+        typer.Option(
+            "--min-disk-mb",
+            help="Minimum free disk space in MB (default: 100)",
+            metavar="MB",
+        ),
     ] = 100,
 ) -> None:
     """Sync Claude web app projects to local storage.
@@ -2508,74 +2805,151 @@ def load_local_status(output_dir: Path) -> dict:
         except (json.JSONDecodeError, OSError):
             pass  # State is optional
 
-    # Parse synced_at timestamp
-    synced_at_str = index.get("synced_at", "")
-    synced_at = parse_timestamp(synced_at_str)
+    # Check if index is new multi-org format or old format
+    is_new_format = "orgs" in index
+
+    if is_new_format:
+        # New format: aggregate data across all orgs
+        orgs = index.get("orgs", {})
+
+        # Find most recent sync timestamp across all orgs
+        most_recent_sync = None
+        most_recent_sync_str = ""
+
+        project_count = 0
+        orphaned_count = 0
+        doc_count = 0
+        conversation_count = 0
+        standalone_count = 0
+        project_list = []
+        missing_dirs = []
+
+        from datetime import datetime, timezone
+
+        for org_uuid, org_data in orgs.items():
+            org_synced_at_str = org_data.get("synced_at", "")
+            org_synced_at = parse_timestamp(org_synced_at_str)
+
+            if org_synced_at and (
+                most_recent_sync is None or org_synced_at > most_recent_sync
+            ):
+                most_recent_sync = org_synced_at
+                most_recent_sync_str = org_synced_at_str
+
+            # Process projects from this org
+            projects_dict = org_data.get("projects", {})
+            for uuid, proj_data in projects_dict.items():
+                is_orphaned = proj_data.get("orphaned", False)
+                if is_orphaned:
+                    orphaned_count += 1
+                else:
+                    project_count += 1
+                    doc_count += proj_data.get("docs_count", 0)
+
+                # Count conversations from state
+                state_proj = state.get("projects", {}).get(uuid, {})
+                convos = state_proj.get("conversations", {})
+                conversation_count += len(convos)
+
+                # Build project info for display (include org name)
+                project_list.append(
+                    {
+                        "name": proj_data.get("name", "Unknown"),
+                        "slug": proj_data.get("slug", ""),
+                        "updated_at": proj_data.get("updated_at", ""),
+                        "docs_count": proj_data.get("docs_count", 0),
+                        "is_orphaned": is_orphaned,
+                        "org_name": org_data.get("name", "Unknown"),
+                    }
+                )
+
+                # Check if directory exists
+                slug = proj_data.get("slug", "")
+                if slug:
+                    project_dir = output_dir / slug
+                    if not project_dir.exists():
+                        missing_dirs.append(slug)
+
+            # Count standalone conversations for this org
+            standalone_count += org_data.get("standalone_conversations", {}).get(
+                "count", 0
+            )
+
+        synced_at_str = most_recent_sync_str
+        synced_at = most_recent_sync
+
+    else:
+        # Old format: single org at root level
+        synced_at_str = index.get("synced_at", "")
+        synced_at = parse_timestamp(synced_at_str)
+
+        projects_dict = index.get("projects", {})
+        project_count = 0
+        orphaned_count = 0
+        doc_count = 0
+        conversation_count = 0
+        project_list = []
+
+        for uuid, proj_data in projects_dict.items():
+            is_orphaned = proj_data.get("orphaned", False)
+            if is_orphaned:
+                orphaned_count += 1
+            else:
+                project_count += 1
+                doc_count += proj_data.get("docs_count", 0)
+
+            # Count conversations from state
+            state_proj = state.get("projects", {}).get(uuid, {})
+            convos = state_proj.get("conversations", {})
+            conversation_count += len(convos)
+
+            # Build project info for display
+            project_list.append(
+                {
+                    "name": proj_data.get("name", "Unknown"),
+                    "slug": proj_data.get("slug", ""),
+                    "updated_at": proj_data.get("updated_at", ""),
+                    "docs_count": proj_data.get("docs_count", 0),
+                    "is_orphaned": is_orphaned,
+                }
+            )
+
+        # Check integrity (verify directories exist)
+        missing_dirs = []
+        if output_dir.exists():
+            for uuid, proj_data in projects_dict.items():
+                slug = proj_data.get("slug", "")
+                if slug:
+                    project_dir = output_dir / slug
+                    if not project_dir.exists():
+                        missing_dirs.append(slug)
+
+        # Count standalone conversations
+        standalone_count = index.get("standalone_conversations", {}).get("count", 0)
 
     # Compute age
-    age_seconds = 0
+    age_seconds: float = 0
     age_human = "unknown"
     if synced_at:
         from datetime import datetime, timezone
+
         now = datetime.now(timezone.utc)
         age_seconds = (now - synced_at).total_seconds()
         age_human = format_time_ago(age_seconds)
 
-    # Count projects, docs, conversations
-    projects_dict = index.get("projects", {})
-    project_count = 0
-    orphaned_count = 0
-    doc_count = 0
-    conversation_count = 0
-
-    # Build list of projects with metadata
-    project_list = []
-    for uuid, proj_data in projects_dict.items():
-        is_orphaned = proj_data.get("orphaned", False)
-        if is_orphaned:
-            orphaned_count += 1
-        else:
-            project_count += 1
-            # Count docs
-            doc_count += proj_data.get("docs_count", 0)
-
-        # Count conversations from state
-        state_proj = state.get("projects", {}).get(uuid, {})
-        convos = state_proj.get("conversations", {})
-        conversation_count += len(convos)
-
-        # Build project info for display
-        project_list.append({
-            "name": proj_data.get("name", "Unknown"),
-            "slug": proj_data.get("slug", ""),
-            "updated_at": proj_data.get("updated_at", ""),
-            "docs_count": proj_data.get("docs_count", 0),
-            "is_orphaned": is_orphaned,
-        })
-
     # Sort by updated_at (most recent first)
     from datetime import datetime, timezone as tz
+
     project_list.sort(
-        key=lambda p: parse_timestamp(p["updated_at"]) or datetime.min.replace(tzinfo=tz.utc),
-        reverse=True
+        key=lambda p: parse_timestamp(p["updated_at"])
+        or datetime.min.replace(tzinfo=tz.utc),
+        reverse=True,
     )
 
-    # Check integrity (verify directories exist)
+    # Check integrity
     integrity = "ok"
-    missing_dirs = []
-    if output_dir.exists():
-        for uuid, proj_data in projects_dict.items():
-            slug = proj_data.get("slug", "")
-            if slug:
-                project_dir = output_dir / slug
-                if not project_dir.exists():
-                    missing_dirs.append(slug)
-
     if missing_dirs:
         integrity = f"{len(missing_dirs)} project directories missing"
-
-    # Count standalone conversations
-    standalone_count = index.get("standalone_conversations", {}).get("count", 0)
 
     return {
         "has_data": True,
@@ -2654,10 +3028,12 @@ def fetch_remote_status(
     deleted_projects = []
     for uuid in deleted_uuids:
         local_proj = local_state.get("projects", {}).get(uuid, {})
-        deleted_projects.append({
-            "uuid": uuid,
-            "name": local_proj.get("name", "Unknown"),
-        })
+        deleted_projects.append(
+            {
+                "uuid": uuid,
+                "name": local_proj.get("name", "Unknown"),
+            }
+        )
 
     # Check modified projects (in both local and remote)
     modified_projects = []
@@ -2670,13 +3046,7 @@ def fetch_remote_status(
         uuid = remote_proj["uuid"]
         local_proj_state = local_state.get("projects", {}).get(uuid, {})
 
-        changes = {}
-
-        # Check updated_at timestamp
-        remote_updated = remote_proj.get("updated_at", "")
-        local_updated = local_proj_state.get("updated_at", "")
-
-        timestamp_changed = not timestamps_equal(remote_updated, local_updated)
+        changes: dict[str, Any] = {}
 
         # Always fetch project details and conversations to detect all changes
         # (timestamp doesn't always update for instruction changes or new conversations)
@@ -2686,7 +3056,9 @@ def fetch_remote_status(
             full_project = fetch_project_details(session, org_uuid, uuid)
 
             # Check instructions (prompt_template) hash
-            remote_template_hash = compute_doc_hash(full_project.get("prompt_template", ""))
+            remote_template_hash = compute_doc_hash(
+                full_project.get("prompt_template", "")
+            )
             local_template_hash = local_proj_state.get("prompt_template_hash", "")
 
             if remote_template_hash != local_template_hash:
@@ -2714,23 +3086,31 @@ def fetch_remote_status(
                         local_convo = local_convos[convo_uuid]
                         if not timestamps_equal(
                             convo_meta.get("updated_at", ""),
-                            local_convo.get("updated_at", "")
+                            local_convo.get("updated_at", ""),
                         ):
                             modified_convos += 1
 
                 if modified_convos > 0:
                     if "conversations" not in changes:
-                        changes["conversations"] = {"local": local_convo_count, "remote": remote_convo_count, "diff": 0}
+                        changes["conversations"] = {
+                            "local": local_convo_count,
+                            "remote": remote_convo_count,
+                            "diff": 0,
+                        }
                     changes["conversations"]["modified"] = modified_convos
 
             except (APIError, FileNotFoundError) as e:
-                log.debug(f"Could not fetch conversations for {remote_proj.get('name')}: {e}")
+                log.debug(
+                    f"Could not fetch conversations for {remote_proj.get('name')}: {e}"
+                )
                 # Not critical, continue
 
             # Check document changes if requested
             if check_docs:
                 try:
-                    log.debug(f"Checking docs for {remote_proj.get('name', 'Unknown')}...")
+                    log.debug(
+                        f"Checking docs for {remote_proj.get('name', 'Unknown')}..."
+                    )
                     remote_docs = fetch_project_docs(session, org_uuid, uuid)
 
                     # Build remote doc hash map
@@ -2740,7 +3120,8 @@ def fetch_remote_status(
                         if doc_uuid:
                             remote_doc_hashes[doc_uuid] = {
                                 "hash": compute_doc_hash(doc.get("content", "")),
-                                "filename": doc.get("file_name") or doc.get("filename", ""),
+                                "filename": doc.get("file_name")
+                                or doc.get("filename", ""),
                             }
 
                     # Get local doc hashes
@@ -2782,14 +3163,18 @@ def fetch_remote_status(
                             "deleted": [
                                 {
                                     "uuid": uuid,
-                                    "filename": local_doc_hashes[uuid].get("filename", "unknown"),
+                                    "filename": local_doc_hashes[uuid].get(
+                                        "filename", "unknown"
+                                    ),
                                 }
                                 for uuid in deleted_doc_uuids
                             ],
                         }
 
                 except (APIError, FileNotFoundError) as e:
-                    log.debug(f"Could not fetch docs for {remote_proj.get('name')}: {e}")
+                    log.debug(
+                        f"Could not fetch docs for {remote_proj.get('name')}: {e}"
+                    )
                     # Not critical, continue
 
         except (APIError, FileNotFoundError) as e:
@@ -2798,13 +3183,15 @@ def fetch_remote_status(
 
         # Only add to modified list if there are actual changes
         if changes:
-            modified_projects.append({
-                "uuid": uuid,
-                "name": remote_proj.get("name", "Unknown"),
-                "changes": changes,
-                "created_at": remote_proj.get("created_at", ""),
-                "updated_at": remote_proj.get("updated_at", ""),
-            })
+            modified_projects.append(
+                {
+                    "uuid": uuid,
+                    "name": remote_proj.get("name", "Unknown"),
+                    "changes": changes,
+                    "created_at": remote_proj.get("created_at", ""),
+                    "updated_at": remote_proj.get("updated_at", ""),
+                }
+            )
 
     return {
         "new_projects": new_projects,
@@ -2856,7 +3243,7 @@ def format_remote_status(local_status: dict, remote_status: dict) -> None:
                 if dt:
                     date_str = dt.strftime("%b %d, %Y")
 
-            console.print(f"  [green][NEW][/green]  \"{name}\"", end="")
+            console.print(f'  [green][NEW][/green]  "{name}"', end="")
             if date_str:
                 console.print(f" - created {date_str}")
             else:
@@ -2870,7 +3257,7 @@ def format_remote_status(local_status: dict, remote_status: dict) -> None:
             name = proj.get("name", "Unknown")
             changes = proj.get("changes", {})
 
-            console.print(f"  [yellow][MOD][/yellow]  \"{name}\"")
+            console.print(f'  [yellow][MOD][/yellow]  "{name}"')
 
             # Instructions changed
             if "instructions" in changes:
@@ -2912,28 +3299,44 @@ def format_remote_status(local_status: dict, remote_status: dict) -> None:
                     parts.append(f"{len(deleted_docs)} deleted")
 
                 if parts:
-                    changed_count = len(new_docs) + len(modified_docs) + len(deleted_docs)
-                    console.print(f"         - Docs: {', '.join(parts)} ({changed_count} of {total_docs} changed)")
+                    changed_count = (
+                        len(new_docs) + len(modified_docs) + len(deleted_docs)
+                    )
+                    console.print(
+                        f"         - Docs: {', '.join(parts)} ({changed_count} of {total_docs} changed)"
+                    )
 
                     # Show specific files (up to 5 per category)
                     max_show = 5
                     if modified_docs:
                         for doc in modified_docs[:max_show]:
-                            console.print(f"           - [yellow]{doc['filename']}[/yellow] (modified)")
+                            console.print(
+                                f"           - [yellow]{doc['filename']}[/yellow] (modified)"
+                            )
                         if len(modified_docs) > max_show:
-                            console.print(f"           - [dim]... and {len(modified_docs) - max_show} more modified[/dim]")
+                            console.print(
+                                f"           - [dim]... and {len(modified_docs) - max_show} more modified[/dim]"
+                            )
 
                     if new_docs:
                         for doc in new_docs[:max_show]:
-                            console.print(f"           - [green]{doc['filename']}[/green] (new)")
+                            console.print(
+                                f"           - [green]{doc['filename']}[/green] (new)"
+                            )
                         if len(new_docs) > max_show:
-                            console.print(f"           - [dim]... and {len(new_docs) - max_show} more new[/dim]")
+                            console.print(
+                                f"           - [dim]... and {len(new_docs) - max_show} more new[/dim]"
+                            )
 
                     if deleted_docs:
                         for doc in deleted_docs[:max_show]:
-                            console.print(f"           - [red]{doc['filename']}[/red] (deleted)")
+                            console.print(
+                                f"           - [red]{doc['filename']}[/red] (deleted)"
+                            )
                         if len(deleted_docs) > max_show:
-                            console.print(f"           - [dim]... and {len(deleted_docs) - max_show} more deleted[/dim]")
+                            console.print(
+                                f"           - [dim]... and {len(deleted_docs) - max_show} more deleted[/dim]"
+                            )
 
             # Error fetching
             if "error" in changes:
@@ -2946,12 +3349,14 @@ def format_remote_status(local_status: dict, remote_status: dict) -> None:
         console.print("[bold cyan]Deleted Projects:[/bold cyan]")
         for proj in deleted_projects:
             name = proj.get("name", "Unknown")
-            console.print(f"  [red][DEL][/red]  \"{name}\" - deleted remotely")
+            console.print(f'  [red][DEL][/red]  "{name}" - deleted remotely')
         console.print()
 
     # Summary
     console.print("[bold]Summary:[/bold]")
-    console.print(f"  {len(new_projects)} new, {len(modified_projects)} modified, {len(deleted_projects)} deleted")
+    console.print(
+        f"  {len(new_projects)} new, {len(modified_projects)} modified, {len(deleted_projects)} deleted"
+    )
     console.print()
     console.print("[dim]Run [bold]claude_sync.py sync[/bold] to sync changes[/dim]")
     console.print()
@@ -2991,17 +3396,19 @@ def format_local_status(status: dict) -> None:
     console.print(f"  Projects: {status.get('project_count', 0)} synced")
     console.print(f"  Documents: {status.get('doc_count', 0)} total")
 
-    conv_count = status.get('conversation_count', 0)
+    conv_count = status.get("conversation_count", 0)
     if conv_count > 0:
         console.print(f"  Conversations: {conv_count}")
     else:
-        console.print("  Conversations: 0 [dim](use --skip-conversations=false on sync)[/dim]")
+        console.print(
+            "  Conversations: 0 [dim](use --skip-conversations=false on sync)[/dim]"
+        )
 
-    standalone_count = status.get('standalone_count', 0)
+    standalone_count = status.get("standalone_count", 0)
     if standalone_count > 0:
         console.print(f"  Standalone: {standalone_count} conversations")
 
-    orphaned = status.get('orphaned_count', 0)
+    orphaned = status.get("orphaned_count", 0)
     if orphaned > 0:
         console.print(f"  Orphaned: [yellow]{orphaned}[/yellow]")
     else:
@@ -3056,7 +3463,9 @@ def format_local_status(status: dict) -> None:
                 console.print(f"  ... and {len(missing) - 5} more")
 
     console.print()
-    console.print("[dim]Use [bold]claude_sync.py sync --help[/bold] for sync options[/dim]")
+    console.print(
+        "[dim]Use [bold]claude_sync.py sync --help[/bold] for sync options[/dim]"
+    )
     console.print()
 
 
@@ -3064,19 +3473,31 @@ def format_local_status(status: dict) -> None:
 def status(
     output: Annotated[
         Path,
-        typer.Option("-o", "--output", help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})"),
+        typer.Option(
+            "-o", "--output", help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})"
+        ),
     ] = DEFAULT_OUTPUT_DIR,
     remote: Annotated[
         bool,
-        typer.Option("--remote", help="Check for changes on claude.ai (requires authentication)"),
+        typer.Option(
+            "--remote", help="Check for changes on claude.ai (requires authentication)"
+        ),
     ] = False,
     check_docs: Annotated[
         bool,
-        typer.Option("--check-docs", help="Check for document changes (requires --remote, fetches all docs - may be slow)"),
+        typer.Option(
+            "--check-docs",
+            help="Check for document changes (requires --remote, fetches all docs - may be slow)",
+        ),
     ] = False,
     browser: Annotated[
         Browser,
-        typer.Option("-b", "--browser", help="Browser to extract cookies from (default: edge)", case_sensitive=False),
+        typer.Option(
+            "-b",
+            "--browser",
+            help="Browser to extract cookies from (default: edge)",
+            case_sensitive=False,
+        ),
     ] = Browser.edge,
 ) -> None:
     """Show local sync status and optionally check for remote changes.
@@ -3110,7 +3531,9 @@ def status(
         if remote:
             # Get org_uuid from local state
             if not status_data.get("has_data"):
-                log.error("No local sync data found. Run 'sync' first before using --remote.")
+                log.error(
+                    "No local sync data found. Run 'sync' first before using --remote."
+                )
                 raise typer.Exit(1)
 
             # Load org_uuid from index.json
@@ -3120,13 +3543,17 @@ def status(
             org_uuid = index.get("org_id")
 
             if not org_uuid:
-                log.error("No org_id in index.json. Please re-sync to update local state.")
+                log.error(
+                    "No org_id in index.json. Please re-sync to update local state."
+                )
                 raise typer.Exit(1)
 
             # Fetch remote status
             log.info("Authenticating and fetching remote state...")
             if check_docs:
-                log.info("Document checking enabled - this may take a while for projects with many documents...")
+                log.info(
+                    "Document checking enabled - this may take a while for projects with many documents..."
+                )
 
             cookies = get_session_cookies(browser.value)
             session = create_session(cookies)
@@ -3134,7 +3561,9 @@ def status(
             # Load sync state for detailed comparison
             state = load_sync_state(output)
 
-            remote_status = fetch_remote_status(session, org_uuid, status_data, state, check_docs=check_docs)
+            remote_status = fetch_remote_status(
+                session, org_uuid, status_data, state, check_docs=check_docs
+            )
             format_remote_status(status_data, remote_status)
         else:
             format_local_status(status_data)
