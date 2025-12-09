@@ -1923,13 +1923,19 @@ def sync(config: Config) -> int:
             for uuid, info in prev_failed.items():
                 log.info(f"  - {info.get('name', uuid[:8])}: {info.get('error', 'unknown error')}")
 
-        for project in tqdm(projects, desc="Syncing projects", unit="project"):
+        pbar = tqdm(projects, desc="Syncing projects", unit="project")
+        for project in pbar:
             if _interrupted:
                 log.info("Stopping sync early due to interrupt")
                 break
 
             project_uuid = project["uuid"]
             project_name = project.get("name", "Unknown")
+
+            # Update progress bar with current project name (truncate if too long)
+            display_name = project_name[:30] + "..." if len(project_name) > 30 else project_name
+            pbar.set_description(f"Syncing: {display_name}")
+
             log.debug(f"Processing: {project_name}")
 
             # Track that we checked this project
