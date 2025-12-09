@@ -2412,6 +2412,7 @@ def fetch_remote_status(
     org_uuid: str,
     local_status: dict,
     local_state: dict,
+    check_docs: bool = False,
 ) -> dict:
     """Fetch remote state and compare with local.
 
@@ -2420,6 +2421,7 @@ def fetch_remote_status(
         org_uuid: Organization UUID
         local_status: Local status dict from load_local_status
         local_state: Sync state dict from load_sync_state
+        check_docs: If True, fetch and hash all documents to detect changes
 
     Returns:
         Dict with:
@@ -2516,10 +2518,70 @@ def fetch_remote_status(
                 log.debug(f"Could not fetch conversations for {remote_proj.get('name')}: {e}")
                 # Not critical, continue
 
-            # Note: We don't fetch full doc content for efficiency
-            # Only mention docs if something else changed (timestamp, instructions, or conversations)
-            # This avoids noisy output when docs exist but haven't changed
-            # Users can run full sync to check doc content changes
+            # Check document changes if requested
+            if check_docs:
+                try:
+                    log.debug(f"Checking docs for {remote_proj.get('name', 'Unknown')}...")
+                    remote_docs = fetch_project_docs(session, org_uuid, uuid)
+
+                    # Build remote doc hash map
+                    remote_doc_hashes = {}
+                    for doc in remote_docs:
+                        doc_uuid = doc.get("uuid", "")
+                        if doc_uuid:
+                            remote_doc_hashes[doc_uuid] = {
+                                "hash": compute_doc_hash(doc.get("content", "")),
+                                "filename": doc.get("file_name") or doc.get("filename", ""),
+                            }
+
+                    # Get local doc hashes
+                    local_doc_hashes = local_proj_state.get("docs", {})
+
+                    # Detect doc changes
+                    remote_doc_uuids = set(remote_doc_hashes.keys())
+                    local_doc_uuids = set(local_doc_hashes.keys())
+
+                    new_doc_uuids = remote_doc_uuids - local_doc_uuids
+                    deleted_doc_uuids = local_doc_uuids - remote_doc_uuids
+
+                    # Check for modified docs
+                    modified_doc_uuids = set()
+                    for doc_uuid in remote_doc_uuids & local_doc_uuids:
+                        remote_hash = remote_doc_hashes[doc_uuid]["hash"]
+                        local_hash = local_doc_hashes[doc_uuid].get("hash", "")
+                        if remote_hash != local_hash:
+                            modified_doc_uuids.add(doc_uuid)
+
+                    # Record doc changes if any
+                    if new_doc_uuids or deleted_doc_uuids or modified_doc_uuids:
+                        changes["docs"] = {
+                            "total": len(remote_doc_uuids),
+                            "new": [
+                                {
+                                    "uuid": uuid,
+                                    "filename": remote_doc_hashes[uuid]["filename"],
+                                }
+                                for uuid in new_doc_uuids
+                            ],
+                            "modified": [
+                                {
+                                    "uuid": uuid,
+                                    "filename": remote_doc_hashes[uuid]["filename"],
+                                }
+                                for uuid in modified_doc_uuids
+                            ],
+                            "deleted": [
+                                {
+                                    "uuid": uuid,
+                                    "filename": local_doc_hashes[uuid].get("filename", "unknown"),
+                                }
+                                for uuid in deleted_doc_uuids
+                            ],
+                        }
+
+                except (APIError, FileNotFoundError) as e:
+                    log.debug(f"Could not fetch docs for {remote_proj.get('name')}: {e}")
+                    # Not critical, continue
 
         except (APIError, FileNotFoundError) as e:
             log.warning(f"Could not fetch details for project {uuid}: {e}")
@@ -2622,6 +2684,47 @@ def format_remote_status(local_status: dict, remote_status: dict) -> None:
 
                 if parts:
                     console.print(f"         - Conversations: {', '.join(parts)}")
+
+            # Documents changed
+            if "docs" in changes:
+                doc_info = changes["docs"]
+                new_docs = doc_info.get("new", [])
+                modified_docs = doc_info.get("modified", [])
+                deleted_docs = doc_info.get("deleted", [])
+                total_docs = doc_info.get("total", 0)
+
+                # Summary line
+                parts = []
+                if new_docs:
+                    parts.append(f"{len(new_docs)} new")
+                if modified_docs:
+                    parts.append(f"{len(modified_docs)} modified")
+                if deleted_docs:
+                    parts.append(f"{len(deleted_docs)} deleted")
+
+                if parts:
+                    changed_count = len(new_docs) + len(modified_docs) + len(deleted_docs)
+                    console.print(f"         - Docs: {', '.join(parts)} ({changed_count} of {total_docs} changed)")
+
+                    # Show specific files (up to 5 per category)
+                    max_show = 5
+                    if modified_docs:
+                        for doc in modified_docs[:max_show]:
+                            console.print(f"           - [yellow]{doc['filename']}[/yellow] (modified)")
+                        if len(modified_docs) > max_show:
+                            console.print(f"           - [dim]... and {len(modified_docs) - max_show} more modified[/dim]")
+
+                    if new_docs:
+                        for doc in new_docs[:max_show]:
+                            console.print(f"           - [green]{doc['filename']}[/green] (new)")
+                        if len(new_docs) > max_show:
+                            console.print(f"           - [dim]... and {len(new_docs) - max_show} more new[/dim]")
+
+                    if deleted_docs:
+                        for doc in deleted_docs[:max_show]:
+                            console.print(f"           - [red]{doc['filename']}[/red] (deleted)")
+                        if len(deleted_docs) > max_show:
+                            console.print(f"           - [dim]... and {len(deleted_docs) - max_show} more deleted[/dim]")
 
             # Error fetching
             if "error" in changes:
@@ -2758,6 +2861,10 @@ def status(
         bool,
         typer.Option("--remote", help="Check for changes on claude.ai (requires authentication)"),
     ] = False,
+    check_docs: Annotated[
+        bool,
+        typer.Option("--check-docs", help="Check for document changes (requires --remote, fetches all docs - may be slow)"),
+    ] = False,
     browser: Annotated[
         Browser,
         typer.Option("-b", "--browser", help="Browser to extract cookies from (default: edge)", case_sensitive=False),
@@ -2770,7 +2877,13 @@ def status(
 
     Without --remote: Shows local status only (no authentication required)
     With --remote: Compares local state with claude.ai to detect changes
+    With --check-docs: Also check for document content changes (requires --remote)
     """
+    # Validate flag combinations
+    if check_docs and not remote:
+        log.error("--check-docs requires --remote flag")
+        raise typer.Exit(1)
+
     try:
         status_data = load_local_status(output)
 
@@ -2792,13 +2905,16 @@ def status(
 
             # Fetch remote status
             log.info("Authenticating and fetching remote state...")
+            if check_docs:
+                log.info("Document checking enabled - this may take a while for projects with many documents...")
+
             cookies = get_session_cookies(browser.value)
             session = create_session(cookies)
 
             # Load sync state for detailed comparison
             state = load_sync_state(output)
 
-            remote_status = fetch_remote_status(session, org_uuid, status_data, state)
+            remote_status = fetch_remote_status(session, org_uuid, status_data, state, check_docs=check_docs)
             format_remote_status(status_data, remote_status)
         else:
             format_local_status(status_data)

@@ -36,10 +36,35 @@ Single UV script (`claude_sync.py`) with inline dependencies:
 
 ## Development Guidelines
 
+- **Bash timeouts**: Use the Bash tool's `timeout` parameter instead of wrapping commands with `timeout`. This avoids permission prompt issues (Claude Code uses prefix matching, so `timeout X cmd` doesn't match `cmd:*` rules).
 - Single-file UV script with inline deps for portability
 - Configurable output location (default: `~/.local/share/claude-sync/`)
 - User-agnostic: No hardcoded paths or personal data
 - Robust filename sanitization (cross-platform)
+
+## Testing Approach
+
+**Use local `test-data/` directory** instead of `~/.local/share/claude-sync/` to avoid permission prompts:
+
+```bash
+# Create test directory (gitignored)
+mkdir -p ./test-data
+
+# Copy real sync data for testing (one-time setup)
+cp ~/.local/share/claude-sync/index.json ./test-data/
+cp ~/.local/share/claude-sync/.sync-state.json ./test-data/
+
+# Test with local directory
+uv run ./claude_sync.py status -o ./test-data
+
+# For remote tests, you can still use -o ./test-data for output
+# but remote API calls will work normally
+```
+
+**Why this matters:**
+- Avoids repeated permission prompts for `~/.local/share/` operations
+- `test-data/` is in `.gitignore` so test artifacts aren't committed
+- Sub-agents can run tests without needing user approval
 
 ## Key Files
 
