@@ -206,6 +206,7 @@ class Config:
     include_standalone: bool = (
         False  # Include standalone conversations (not in projects)
     )
+    dry_run: bool = False  # Validate config and auth without syncing
 
 
 def get_config_from_env() -> dict:
@@ -2316,6 +2317,32 @@ def sync(config: Config) -> int:
         projects = fetch_projects(session, org_uuid)
         log.info(f"Found {len(projects)} projects")
 
+        # Handle dry-run mode: validate and show what would sync, then exit
+        if config.dry_run:
+            log.info("")
+            log.info("=== DRY RUN MODE ===")
+            log.info("Configuration validated successfully:")
+            log.info(f"  ✓ Browser cookies extracted ({config.browser})")
+            log.info("  ✓ API authentication working")
+            log.info(f"  ✓ Organization: {org_name} ({org_uuid[:8]}...)")
+            log.info(f"  ✓ Found {len(projects)} projects")
+            log.info("")
+            log.info("Projects that would be synced:")
+            for p in projects[:10]:  # Show first 10
+                log.info(f"  - {p.get('name', 'Unknown')} ({p['uuid'][:8]})")
+            if len(projects) > 10:
+                log.info(f"  ... and {len(projects) - 10} more")
+            log.info("")
+            log.info("Options:")
+            log.info(f"  - Output directory: {config.output_dir}")
+            log.info(f"  - Skip conversations: {config.skip_conversations}")
+            log.info(f"  - Include standalone: {config.include_standalone}")
+            log.info(f"  - Full sync: {config.full_sync}")
+            log.info(f"  - Auto git commit: {config.auto_commit}")
+            log.info("")
+            log.info("Dry run complete. No files were written.")
+            return 0
+
         # Step 3b: Filter to single project if requested
         if config.project_filter:
             filter_str = config.project_filter.lower()
@@ -2663,6 +2690,13 @@ def sync_command(
             metavar="MB",
         ),
     ] = 100,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            help="Validate config and auth, show what would sync, but don't write files",
+        ),
+    ] = False,
 ) -> None:
     """Sync Claude web app projects to local storage.
 
@@ -2712,6 +2746,7 @@ def sync_command(
         project_filter=project,
         min_disk_mb=min_disk_mb,
         include_standalone=include_standalone,
+        dry_run=dry_run,
     )
 
     if config.verbose:
