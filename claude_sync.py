@@ -2251,6 +2251,265 @@ def sync_command(
         raise typer.Exit(code=130)  # Standard SIGINT exit code
 
 
+def load_local_status(output_dir: Path) -> dict:
+    """Load local sync status from index.json and .sync-state.json.
+
+    Args:
+        output_dir: Base output directory
+
+    Returns:
+        Dict with status information including:
+        - synced_at: ISO timestamp of last sync
+        - age_seconds: seconds since last sync
+        - age_human: human readable age
+        - project_count: number of projects
+        - doc_count: total document count
+        - conversation_count: total conversation count
+        - orphaned_count: number of orphaned projects
+        - projects: list of project info dicts (sorted by updated_at)
+        - integrity: "ok" or error message
+        - has_data: bool, whether any sync data exists
+    """
+    index_path = output_dir / "index.json"
+    state_path = output_dir / SYNC_STATE_FILE
+
+    # Check if any data exists
+    if not index_path.exists():
+        return {
+            "has_data": False,
+            "error": f"No sync data found at {output_dir}",
+        }
+
+    # Read index.json
+    try:
+        with open(index_path) as f:
+            index = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        return {
+            "has_data": False,
+            "error": f"Corrupted index.json: {e}",
+        }
+
+    # Read .sync-state.json if exists
+    state = {}
+    if state_path.exists():
+        try:
+            with open(state_path) as f:
+                state = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass  # State is optional
+
+    # Parse synced_at timestamp
+    synced_at_str = index.get("synced_at", "")
+    synced_at = parse_timestamp(synced_at_str)
+
+    # Compute age
+    age_seconds = 0
+    age_human = "unknown"
+    if synced_at:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        age_seconds = (now - synced_at).total_seconds()
+        age_human = format_time_ago(age_seconds)
+
+    # Count projects, docs, conversations
+    projects_dict = index.get("projects", {})
+    project_count = 0
+    orphaned_count = 0
+    doc_count = 0
+    conversation_count = 0
+
+    # Build list of projects with metadata
+    project_list = []
+    for uuid, proj_data in projects_dict.items():
+        is_orphaned = proj_data.get("orphaned", False)
+        if is_orphaned:
+            orphaned_count += 1
+        else:
+            project_count += 1
+            # Count docs
+            doc_count += proj_data.get("docs_count", 0)
+
+        # Count conversations from state
+        state_proj = state.get("projects", {}).get(uuid, {})
+        convos = state_proj.get("conversations", {})
+        conversation_count += len(convos)
+
+        # Build project info for display
+        project_list.append({
+            "name": proj_data.get("name", "Unknown"),
+            "slug": proj_data.get("slug", ""),
+            "updated_at": proj_data.get("updated_at", ""),
+            "docs_count": proj_data.get("docs_count", 0),
+            "is_orphaned": is_orphaned,
+        })
+
+    # Sort by updated_at (most recent first)
+    from datetime import datetime, timezone as tz
+    project_list.sort(
+        key=lambda p: parse_timestamp(p["updated_at"]) or datetime.min.replace(tzinfo=tz.utc),
+        reverse=True
+    )
+
+    # Check integrity (verify directories exist)
+    integrity = "ok"
+    missing_dirs = []
+    if output_dir.exists():
+        for uuid, proj_data in projects_dict.items():
+            slug = proj_data.get("slug", "")
+            if slug:
+                project_dir = output_dir / slug
+                if not project_dir.exists():
+                    missing_dirs.append(slug)
+
+    if missing_dirs:
+        integrity = f"{len(missing_dirs)} project directories missing"
+
+    # Count standalone conversations
+    standalone_count = index.get("standalone_conversations", {}).get("count", 0)
+
+    return {
+        "has_data": True,
+        "synced_at": synced_at_str,
+        "age_seconds": age_seconds,
+        "age_human": age_human,
+        "project_count": project_count,
+        "doc_count": doc_count,
+        "conversation_count": conversation_count,
+        "standalone_count": standalone_count,
+        "orphaned_count": orphaned_count,
+        "projects": project_list,
+        "integrity": integrity,
+        "location": str(output_dir),
+        "missing_dirs": missing_dirs,
+    }
+
+
+def format_time_ago(seconds: float) -> str:
+    """Format time duration as human-readable string.
+
+    Args:
+        seconds: Duration in seconds
+
+    Returns:
+        Human readable string like "2 days ago" or "3 hours ago"
+    """
+    if seconds < 60:
+        return "just now"
+    elif seconds < 3600:
+        minutes = int(seconds / 60)
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    elif seconds < 86400:
+        hours = int(seconds / 3600)
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    else:
+        days = int(seconds / 86400)
+        return f"{days} day{'s' if days != 1 else ''} ago"
+
+
+def format_local_status(status: dict) -> None:
+    """Format and print local status using Rich console.
+
+    Args:
+        status: Status dict from load_local_status
+    """
+    from rich.console import Console
+
+    console = Console()
+
+    # Handle no data case
+    if not status.get("has_data"):
+        console.print("\n[bold red]No sync data found[/bold red]")
+        console.print(f"Location: {status.get('error', 'unknown error')}")
+        console.print("\nRun [bold]claude_sync.py sync[/bold] to perform initial sync.")
+        return
+
+    # Print header
+    console.print("\n[bold cyan]claude-sync Status[/bold cyan]")
+    console.print("=" * 50)
+    console.print()
+
+    # Last sync info
+    synced_at = status.get("synced_at", "unknown")
+    age_human = status.get("age_human", "unknown")
+    console.print(f"Last sync: [bold]{synced_at}[/bold] ({age_human})")
+    console.print(f"Location: [dim]{status.get('location', 'unknown')}[/dim]")
+    console.print()
+
+    # Summary section
+    console.print("[bold]Summary:[/bold]")
+    console.print(f"  Projects: {status.get('project_count', 0)} synced")
+    console.print(f"  Documents: {status.get('doc_count', 0)} total")
+
+    conv_count = status.get('conversation_count', 0)
+    if conv_count > 0:
+        console.print(f"  Conversations: {conv_count}")
+    else:
+        console.print("  Conversations: 0 [dim](use --skip-conversations=false on sync)[/dim]")
+
+    standalone_count = status.get('standalone_count', 0)
+    if standalone_count > 0:
+        console.print(f"  Standalone: {standalone_count} conversations")
+
+    orphaned = status.get('orphaned_count', 0)
+    if orphaned > 0:
+        console.print(f"  Orphaned: [yellow]{orphaned}[/yellow]")
+    else:
+        console.print("  Orphaned: 0")
+
+    console.print()
+
+    # Recently active projects
+    projects = status.get("projects", [])
+    active_projects = [p for p in projects if not p.get("is_orphaned")]
+
+    if active_projects:
+        console.print("[bold]Recently Active:[/bold] [dim](by last sync update)[/dim]")
+        # Show top 5-10 projects
+        display_count = min(10, len(active_projects))
+        for proj in active_projects[:display_count]:
+            name = proj.get("name", "Unknown")
+            docs = proj.get("docs_count", 0)
+            updated = proj.get("updated_at", "")
+
+            # Format date (just show month and day)
+            date_str = ""
+            if updated:
+                dt = parse_timestamp(updated)
+                if dt:
+                    date_str = dt.strftime("%b %d")
+
+            # Truncate name if too long
+            if len(name) > 40:
+                name = name[:37] + "..."
+
+            console.print(f"  {name:<43} {docs:>3} docs   {date_str}")
+
+        if len(active_projects) > display_count:
+            remaining = len(active_projects) - display_count
+            console.print(f"  [dim]... and {remaining} more[/dim]")
+
+    console.print()
+
+    # Integrity check
+    integrity = status.get("integrity", "unknown")
+    if integrity == "ok":
+        console.print("[bold green]Integrity: OK[/bold green]")
+    else:
+        console.print(f"[bold red]Integrity: {integrity}[/bold red]")
+        missing = status.get("missing_dirs", [])
+        if missing:
+            console.print("\n[yellow]Missing directories:[/yellow]")
+            for slug in missing[:5]:
+                console.print(f"  - {slug}")
+            if len(missing) > 5:
+                console.print(f"  ... and {len(missing) - 5} more")
+
+    console.print()
+    console.print("[dim]Use [bold]claude_sync.py sync --help[/bold] for sync options[/dim]")
+    console.print()
+
+
 @app.command()
 def status(
     output: Annotated[
@@ -2258,13 +2517,19 @@ def status(
         typer.Option("-o", "--output", help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})"),
     ] = DEFAULT_OUTPUT_DIR,
 ) -> None:
-    """Show sync status and detect changes.
+    """Show local sync status.
 
-    Displays information about the last sync and detects any changes
-    that would be synced on the next run.
+    Displays information about the last sync including project counts,
+    document counts, and recently active projects.
+
+    Does not require authentication or network access.
     """
-    print("Status command not yet implemented")
-    raise typer.Exit(0)
+    try:
+        status_data = load_local_status(output)
+        format_local_status(status_data)
+    except Exception as e:
+        log.error(f"Failed to load status: {e}")
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":
