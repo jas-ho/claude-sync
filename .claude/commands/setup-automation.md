@@ -196,7 +196,25 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable
 Register-ScheduledTask -TaskName "ClaudeSync" -Action $action -Trigger $trigger -Settings $settings
 ```
 
-### 3. Confirm and install
+### 3. Test the command first
+
+**Before installing automation**, run a dry test of the exact command that will be scheduled:
+
+```bash
+# Test the command (this actually runs a sync, so user knows it works)
+uv run --script /path/to/claude_sync.py ORG_UUID --include-standalone
+```
+
+This catches:
+- Wrong flag names
+- Missing dependencies
+- Invalid org UUID
+- Permission issues
+- Script path problems
+
+Only proceed to installation if the test succeeds. If it fails, help debug before setting up automation.
+
+### 4. Confirm and install
 
 1. Show the generated configuration to the user
 2. Explain what it does
@@ -206,7 +224,7 @@ Register-ScheduledTask -TaskName "ClaudeSync" -Action $action -Trigger $trigger 
 6. Provide the commands to activate the scheduler
 7. Verify it's working
 
-### 4. Provide ongoing management info
+### 5. Provide ongoing management info
 
 After setup, remind user:
 - Where logs are stored
