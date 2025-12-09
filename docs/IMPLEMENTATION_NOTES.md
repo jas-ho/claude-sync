@@ -23,12 +23,19 @@ Notes collected during implementation for sanity check review.
 
 ```
 ~/.local/share/claude-sync/
-├── index.json
-└── <project-slug>-<uuid8>/
+├── .sync-state.json       # Internal sync state (timestamps, hashes)
+├── index.json             # Project manifest
+├── _standalone/           # Standalone conversations (not in projects)
+│   ├── index.json         # Standalone conversation manifest
+│   └── <conversation-name>.md  # Individual conversations (named by title)
+└── <project-slug>/
     ├── CLAUDE.md          # prompt_template with frontmatter
     ├── meta.json          # project metadata
-    └── docs/
-        └── *.md
+    ├── docs/              # project documents
+    │   └── *.md
+    └── conversations/     # project conversation history
+        ├── index.json     # conversation manifest
+        └── <conversation-name>.md  # individual conversations (named by title)
 ```
 
 ## Edge Cases Handled
@@ -45,10 +52,26 @@ Notes collected during implementation for sanity check review.
 - No filename on doc → defaults to `untitled.md`
 - Missing extension → adds `.md`
 
+## Recent Features Added
+
+### Status Command
+- Local status check (no auth required): sync age, counts, integrity check
+- Remote status check (`--remote`): detects new/modified/deleted projects and conversations
+- Document checking (`--check-docs`): thorough check for document changes (requires `--remote`)
+
+### Error Handling Improvements
+- Failed project tracking: sync continues if individual projects fail
+- Stale lock detection: warns if lock file exists but process is dead
+- Better error messages with recovery instructions
+
+### Standalone Conversations
+- Support for syncing conversations not attached to any project
+- `--include-standalone` flag to enable
+- Saved to `_standalone/` directory
+
 ## Known Issues / TODOs
 
 1. **Multiple orgs with same name**: User has two "Apart Research" orgs - no way to distinguish except by UUID
-2. **No error recovery**: If one project fails, whole sync fails (task 8co.10)
 
 ## Performance
 

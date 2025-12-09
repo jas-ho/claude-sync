@@ -251,16 +251,15 @@ Since we can't push changes back:
 
 ## 4. Implementation Phases
 
-### Phase 1: MVP (80% Value) - "Fetch & Organize"
+### Phase 1: MVP (80% Value) - "Fetch & Organize" [COMPLETED]
 
 **Goal**: Get web app project content into Claude Code-friendly local structure
 
 **Features**:
-- [x] Existing: `claude_export.py` gist handles fetching
-- [ ] Post-process ZIP into organized directory structure
-- [ ] Generate CLAUDE.md for each project from `prompt_template`
-- [ ] Create index/manifest for discoverability
-- [ ] Basic CLI: `claude-sync fetch <org-id>`
+- [x] Direct fetch to organized directory structure (no ZIP intermediate)
+- [x] Generate CLAUDE.md for each project from `prompt_template`
+- [x] Create index/manifest for discoverability
+- [x] CLI: `claude-sync sync <org-id>` with typer framework
 
 **Output Structure**:
 ```
@@ -280,31 +279,31 @@ Since we can't push changes back:
 @~/.local/share/claude-sync/apart-lab-general/CLAUDE.md
 ```
 
-### Phase 2: Incremental Sync - "Smart Updates"
+### Phase 2: Incremental Sync - "Smart Updates" [COMPLETED]
 
 **Goal**: Only fetch what changed
 
 **Features**:
-- [ ] Store sync state (last sync time, remote `updated_at`)
-- [ ] Compare timestamps before fetching full content
-- [ ] Fetch only modified projects/docs
-- [ ] CLI: `claude-sync update` (incremental)
+- [x] Store sync state (last sync time, remote `updated_at` in `.sync-state.json`)
+- [x] Compare timestamps before fetching full content
+- [x] Fetch only modified projects/docs
+- [x] CLI: incremental sync by default, `--full` flag to force full sync
 
 **API Strategy**:
 1. Fetch project list (lightweight)
 2. Compare `updated_at` with stored state
 3. Only fetch full content for changed projects
 
-### Phase 3: Local Change Tracking - "Safe Sync"
+### Phase 3: Local Change Tracking - "Safe Sync" [PARTIALLY COMPLETED]
 
 **Goal**: Don't lose local edits
 
 **Features**:
-- [ ] Hash/mtime tracking for local files
-- [ ] Warn before overwriting modified files
-- [ ] Backup mechanism
-- [ ] `.needs-push` markers for manual sync reminders
-- [ ] CLI: `claude-sync status` (show local changes)
+- [x] Hash tracking for documents (in `.sync-state.json`)
+- [x] Backup mechanism (`.backup/` directory with timestamped files)
+- [x] CLI: `claude-sync status` (show local status and remote changes)
+- [ ] Warn before overwriting modified files (not implemented - backups are automatic)
+- [ ] `.needs-push` markers for manual sync reminders (N/A - read-only sync)
 
 ### Phase 4: Enhanced Integration - "Deep Claude Code"
 

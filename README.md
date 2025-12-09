@@ -87,6 +87,19 @@ Then just run `./claude_sync.py` without arguments.
 ./claude_sync.py
 ```
 
+### Check Sync Status
+
+```bash
+# Show local status (no auth required)
+./claude_sync.py status
+
+# Check for remote changes
+./claude_sync.py status --remote
+
+# Thorough check including document changes (slow)
+./claude_sync.py status --remote --check-docs
+```
+
 ### Options
 
 ```bash
@@ -150,8 +163,7 @@ Standalone conversations are saved to the `_standalone/` directory at the root o
 ├── .backup/                         # Timestamped backups of changed files
 ├── _standalone/                     # Standalone conversations (not in projects)
 │   ├── index.json                   # Standalone conversation manifest
-│   ├── conversation-1.md
-│   └── conversation-2.md
+│   └── <conversation-name>.md       # Individual conversations (named by title)
 └── project-name-abc12345/           # One directory per project
     ├── CLAUDE.md                    # Project instructions (from prompt_template)
     ├── meta.json                    # Project metadata
@@ -160,8 +172,7 @@ Standalone conversations are saved to the `_standalone/` directory at the root o
     │   └── requirements.md
     └── conversations/               # Conversation history
         ├── index.json               # Conversation manifest
-        ├── conversation-1.md
-        └── conversation-2.md
+        └── <conversation-name>.md   # Individual conversations (named by title)
 ```
 
 ### File Formats
@@ -196,6 +207,7 @@ name: My Conversation
 created_at: 2025-12-01T00:00:00Z
 updated_at: 2025-12-07T10:00:00Z
 message_count: 42
+synced_at: 2025-12-07T10:30:00+00:00
 ---
 
 # My Conversation
@@ -314,6 +326,8 @@ git commit -m "Manual sync"
 
 ### Command-line flags
 
+#### Sync command
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `<org-uuid>` | Auto-discover | Organization UUID (optional if only one org) |
@@ -327,6 +341,15 @@ git commit -m "Manual sync"
 | `-v, --verbose` | `false` | Enable verbose output |
 | `--min-disk-mb` | `100` | Minimum free disk space in MB |
 | `--list-orgs` | N/A | List available organizations and exit |
+
+#### Status command
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o, --output` | `~/.local/share/claude-sync` | Output directory |
+| `--remote` | `false` | Check for changes on claude.ai (requires authentication) |
+| `--check-docs` | `false` | Check for document changes (requires --remote, may be slow) |
+| `-b, --browser` | `edge` | Browser to extract cookies from (`edge` or `chrome`) |
 
 ### Environment variables
 

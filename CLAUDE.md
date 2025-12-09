@@ -25,14 +25,14 @@ Single UV script (`claude_sync.py`) with inline dependencies:
 ├── index.json              # Manifest with sync metadata
 ├── _standalone/            # Standalone conversations (not in projects)
 │   ├── index.json          # Standalone conversation manifest
-│   └── conversation-*.md   # Individual standalone conversations
+│   └── <conversation-name>.md  # Individual conversations (named by title)
 └── <project-slug>/
     ├── CLAUDE.md           # Project instructions (from prompt_template)
     ├── meta.json           # Project metadata
     ├── docs/               # Project documents
     └── conversations/      # Project conversation history
         ├── index.json      # Conversation manifest
-        └── conversation-*.md  # Individual conversations
+        └── <conversation-name>.md  # Individual conversations (named by title)
 ```
 
 ## Status Command
@@ -107,8 +107,10 @@ uv run ./claude_sync.py status -o ./test-data
 
 ## Key Files
 
-- `claude_sync.py` - Main script (to be created)
+- `claude_sync.py` - Main script (single-file UV script with inline dependencies)
 - `docs/RESEARCH.md` - Full API research and planning
+- `docs/API_CONTRACT.md` - API response structure assumptions
+- `docs/IMPLEMENTATION_NOTES.md` - Implementation findings and edge cases
 - `reference/` - Old scripts and gist reference
 
 ## Issue Tracking
