@@ -113,12 +113,59 @@ def acquire_lock(output_dir: Path) -> int:
         # Try to read PID from lock file
         try:
             with open(lock_path) as f:
-                pid = f.read().strip()
-            raise RuntimeError(f"Another sync is running (PID: {pid})")
+                pid_str = f.read().strip()
+            pid = int(pid_str)
+
+            # Check if the process is still running
+            try:
+                os.kill(pid, 0)  # Check if process exists (doesn't send signal)
+                # Process exists - lock is valid
+                raise RuntimeError(
+                    f"Another claude-sync process is already running (PID: {pid}).\n"
+                    f"\n"
+                    f"Recovery steps:\n"
+                    f"  1. Wait for the other sync to complete, OR\n"
+                    f"  2. If you're sure no sync is running, kill the process:\n"
+                    f"     kill {pid}\n"
+                    f"  3. Run claude-sync again\n"
+                    f"\n"
+                    f"To check if the process is still active: ps -p {pid}"
+                )
+            except ProcessLookupError:
+                # Process is dead - remove stale lock and retry
+                log.warning(f"Removing stale lock file (PID {pid} is not running)")
+                lock_path.unlink()
+                # Recursively retry lock acquisition
+                return acquire_lock(output_dir)
+            except PermissionError:
+                # Process exists but we can't signal it (still valid lock)
+                raise RuntimeError(
+                    f"Another claude-sync process is already running (PID: {pid}).\n"
+                    f"\n"
+                    f"Recovery steps:\n"
+                    f"  1. Wait for the other sync to complete, OR\n"
+                    f"  2. If you're sure no sync is running, kill the process:\n"
+                    f"     kill {pid}\n"
+                    f"  3. Run claude-sync again\n"
+                    f"\n"
+                    f"Note: Permission denied when checking PID {pid}, but lock file exists."
+                )
         except (OSError, ValueError):
             # OSError: file doesn't exist or can't be read
-            # ValueError: PID is not valid
-            raise RuntimeError("Another sync is running")
+            # ValueError: PID is not valid (not an integer)
+            raise RuntimeError(
+                f"Another claude-sync process appears to be running.\n"
+                f"\n"
+                f"Lock file exists but PID could not be read.\n"
+                f"Lock file: {lock_path}\n"
+                f"\n"
+                f"Recovery steps:\n"
+                f"  1. Check if any claude-sync processes are running:\n"
+                f"     ps aux | grep claude-sync\n"
+                f"  2. If no processes are found, remove the stale lock file:\n"
+                f"     rm \"{lock_path}\"\n"
+                f"  3. Run claude-sync again"
+            )
 
     # Write our PID
     os.ftruncate(fd, 0)
@@ -314,8 +361,16 @@ def get_session_cookies(browser: str) -> "http.cookiejar.CookieJar":
     if missing:
         raise CookieExtractionError(
             f"Missing required cookie(s): {missing}\n"
-            f"Please log into claude.ai in {browser} and retry.\n"
-            f"If you recently logged in, try refreshing the page first."
+            f"\n"
+            f"Recovery steps:\n"
+            f"  1. Close {browser} completely (all windows)\n"
+            f"  2. Open {browser} and visit https://claude.ai\n"
+            f"  3. Log in to your Claude account\n"
+            f"  4. Refresh the page to ensure cookies are set\n"
+            f"  5. Run claude-sync again\n"
+            f"\n"
+            f"Note: If you recently logged in, the cookies may not be persisted yet.\n"
+            f"Refreshing the page after login usually fixes this."
         )
 
     # Check if session might be expired (sessionKey exists but is short/invalid format)
@@ -323,7 +378,13 @@ def get_session_cookies(browser: str) -> "http.cookiejar.CookieJar":
         if cookie.name == "sessionKey" and len(cookie.value) < 20:
             raise CookieExtractionError(
                 "Session key appears invalid (too short).\n"
-                "Please log into claude.ai in your browser and retry."
+                "\n"
+                "Recovery steps:\n"
+                "  1. Close your browser completely (all windows)\n"
+                "  2. Open your browser and visit https://claude.ai\n"
+                "  3. Log in to your Claude account\n"
+                "  4. Refresh the page to ensure cookies are set\n"
+                "  5. Run claude-sync again"
             )
 
     log.info(f"Extracted {len(cookie_names)} cookie(s) from {browser}")
@@ -418,8 +479,17 @@ def _api_request(
             # Check for auth errors
             if response.status_code in (401, 403):
                 raise SessionExpiredError(
-                    "Session expired or invalid.\n"
-                    "Please log into claude.ai in your browser and retry."
+                    f"Authentication failed (HTTP {response.status_code}).\n"
+                    f"\n"
+                    f"Recovery steps:\n"
+                    f"  1. Close your browser completely (all windows)\n"
+                    f"  2. Open your browser and visit https://claude.ai\n"
+                    f"  3. Log in to your Claude account\n"
+                    f"  4. Refresh the page to ensure cookies are set\n"
+                    f"  5. Run claude-sync again\n"
+                    f"\n"
+                    f"If the problem persists, your session cookies may have been corrupted.\n"
+                    f"Try clearing cookies for claude.ai and logging in again."
                 )
 
             # Check for not found
@@ -428,9 +498,24 @@ def _api_request(
 
             # Check for rate limiting
             if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After", "unknown")
+                if retry_after != "unknown":
+                    try:
+                        wait_seconds = int(retry_after)
+                        wait_msg = f"Wait {wait_seconds} seconds"
+                    except ValueError:
+                        wait_msg = f"Wait until {retry_after}"
+                else:
+                    wait_msg = "Wait 5-10 minutes"
+
                 raise APIError(
-                    "Rate limited by Claude.ai.\n"
-                    "Wait a few minutes and try again."
+                    f"Rate limited by Claude.ai (HTTP 429).\n"
+                    f"\n"
+                    f"Recovery steps:\n"
+                    f"  1. {wait_msg} before retrying\n"
+                    f"  2. Run the same command again\n"
+                    f"\n"
+                    f"Note: Rate limits are NOT retried automatically to avoid wasting attempts."
                 )
 
             # Check for server errors - RETRY these
@@ -703,6 +788,20 @@ WINDOWS_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL"} | {
 }
 
 
+def ensure_md_extension(filename: str) -> str:
+    """Ensure filename has .md extension.
+
+    Args:
+        filename: Original filename
+
+    Returns:
+        Filename with .md extension
+    """
+    if not filename or not filename.lower().endswith(".md"):
+        return f"{filename}.md"
+    return filename
+
+
 def sanitize_filename(name: str, max_len: int = 200) -> str:
     """Convert string to valid cross-platform filename.
 
@@ -965,12 +1064,25 @@ def write_project_output(
             existing_uuid = existing_meta.get("uuid")
             if existing_uuid and existing_uuid != project.get("uuid"):
                 # Different project owns this directory! This is a collision.
+                collision_dir = str(project_dir)
                 log.error(
                     f"SLUG COLLISION: Directory {project_dir.name} belongs to project "
-                    f"{existing_uuid}, not {project.get('uuid')}. "
-                    f"Please manually rename one of the directories."
+                    f"{existing_uuid}, not {project.get('uuid')}."
                 )
-                raise ValueError(f"Slug collision detected for {project_dir.name}")
+                raise ValueError(
+                    f"Slug collision detected for directory '{project_dir.name}'.\n"
+                    f"\n"
+                    f"Two projects have names that generate the same directory slug.\n"
+                    f"Existing project UUID: {existing_uuid}\n"
+                    f"New project UUID: {project.get('uuid')}\n"
+                    f"\n"
+                    f"Recovery steps:\n"
+                    f"  1. Manually rename the conflicting directory:\n"
+                    f"     mv \"{collision_dir}\" \"{collision_dir}-old\"\n"
+                    f"  2. Run claude-sync again\n"
+                    f"\n"
+                    f"Alternatively, rename one of the projects on claude.ai to avoid the collision."
+                )
         except json.JSONDecodeError:
             log.warning(f"Corrupted meta.json in {project_dir}, will overwrite")
 
@@ -1046,8 +1158,7 @@ _No project instructions defined._
             # API uses 'file_name' key
             doc_filename = doc.get("file_name") or doc.get("filename") or "untitled.md"
             # Ensure .md extension
-            if not doc_filename.lower().endswith(".md"):
-                doc_filename = f"{doc_filename}.md"
+            doc_filename = ensure_md_extension(doc_filename)
 
             # Sanitize and make unique
             safe_filename = sanitize_filename(doc_filename)
@@ -1060,8 +1171,7 @@ _No project instructions defined._
                 if prev_filename and prev_filename != doc_filename:
                     # Doc was renamed - delete old file
                     prev_safe = sanitize_filename(prev_filename)
-                    if not prev_safe.lower().endswith(".md"):
-                        prev_safe = f"{prev_safe}.md"
+                    prev_safe = ensure_md_extension(prev_safe)
                     old_doc_path = docs_dir / prev_safe
                     # Validate path doesn't escape docs directory
                     if not validate_path_within_directory(old_doc_path, docs_dir):
@@ -1085,8 +1195,7 @@ _No project instructions defined._
                 if prev_filename:
                     # Apply same sanitization as when writing
                     prev_safe = sanitize_filename(prev_filename)
-                    if not prev_safe.lower().endswith(".md"):
-                        prev_safe = f"{prev_safe}.md"
+                    prev_safe = ensure_md_extension(prev_safe)
                     old_doc_path = docs_dir / prev_safe
                     # Validate path doesn't escape docs directory
                     if not validate_path_within_directory(old_doc_path, docs_dir):
@@ -1202,6 +1311,13 @@ def load_sync_state(output_dir: Path) -> dict:
                     "docs": {
                         "<doc_uuid>": {"hash": "...", "filename": "..."}
                     }
+                }
+            },
+            "failed_projects": {  # Optional: only present if there were failures
+                "<uuid>": {
+                    "name": "Project Name",
+                    "error": "Error message",
+                    "failed_at": "ISO timestamp"
                 }
             }
         }
@@ -1491,8 +1607,7 @@ def write_conversation_output(
 
     # Generate filename from conversation name
     base_filename = sanitize_filename(convo_name)
-    if not base_filename.lower().endswith(".md"):
-        base_filename = f"{base_filename}.md"
+    base_filename = ensure_md_extension(base_filename)
 
     filename = get_unique_filename(base_filename, used_filenames)
     used_filenames.add(filename)
@@ -1797,9 +1912,16 @@ def sync(config: Config) -> int:
 
         # Step 5: Process each project
         synced_projects = []
-        failed_projects: list[tuple[str, str]] = []  # (project_name, error_message)
+        failed_projects_dict: dict[str, dict] = {}  # uuid -> {name, error, failed_at}
         synced_count = 0
         skipped_count = 0
+
+        # Log previously failed projects
+        prev_failed = prev_state.get("failed_projects", {})
+        if prev_failed:
+            log.info(f"Retrying {len(prev_failed)} previously failed project(s):")
+            for uuid, info in prev_failed.items():
+                log.info(f"  - {info.get('name', uuid[:8])}: {info.get('error', 'unknown error')}")
 
         for project in tqdm(projects, desc="Syncing projects", unit="project"):
             if _interrupted:
@@ -1942,6 +2064,10 @@ def sync(config: Config) -> int:
                 new_state["projects"][project_uuid] = build_project_state(full_project, docs)
                 synced_projects.append(full_project)
 
+                # Clear from failed projects if it was previously failed
+                if project_uuid in prev_failed:
+                    log.debug(f"Successfully synced previously failed project: {project_name}")
+
             except Exception as e:
                 # Intentionally broad: catch any error in project sync and continue
                 # with other projects rather than failing the entire sync
@@ -1951,7 +2077,14 @@ def sync(config: Config) -> int:
                     import traceback
                     tb = traceback.format_exc()
                     log.error(sanitize_sensitive_data(tb))
-                failed_projects.append((project_name, error_msg))
+
+                # Record failed project in dict with details
+                failed_projects_dict[project_uuid] = {
+                    "name": project_name,
+                    "error": error_msg,
+                    "failed_at": synced_at,
+                }
+
                 # Don't add to synced_projects or new_state - exclude from index.json
                 continue
 
@@ -2068,6 +2201,13 @@ def sync(config: Config) -> int:
                     log.error(sanitize_sensitive_data(tb))
 
         # Step 7: Write index and save sync state
+        # Add failed projects to state for next sync
+        if failed_projects_dict:
+            new_state["failed_projects"] = failed_projects_dict
+        elif "failed_projects" in prev_state:
+            # Clear failed projects from state if all succeeded
+            pass  # Don't add failed_projects key
+
         write_index(synced_projects, config.output_dir, org_uuid, synced_at, orphaned_projects, standalone_conversation_count)
         save_sync_state(config.output_dir, new_state)
 
@@ -2088,9 +2228,11 @@ def sync(config: Config) -> int:
         print(f"  Output: {config.output_dir}")
 
         # Report failures if any
-        if failed_projects:
-            print(f"\nWARNING: {len(failed_projects)} project(s) failed to sync:")
-            for proj_name, error in failed_projects:
+        if failed_projects_dict:
+            print(f"\nWARNING: {len(failed_projects_dict)} project(s) failed to sync:")
+            for uuid, info in failed_projects_dict.items():
+                proj_name = info.get("name", uuid[:8])
+                error = info.get("error", "unknown error")
                 # Truncate error message if too long
                 error_short = error if len(error) <= 100 else f"{error[:97]}..."
                 print(f"  - {proj_name}: {error_short}")
