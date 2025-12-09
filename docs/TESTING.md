@@ -32,6 +32,7 @@ cat /tmp/claude-sync-test/index.json
 ```
 
 **Expected**:
+
 - Output shows "Skipping <project>: unchanged" for all projects
 - Summary shows "0 updated, N unchanged"
 - Git shows "No changes to commit"
@@ -39,15 +40,16 @@ cat /tmp/claude-sync-test/index.json
 ## Test 3: Project Metadata Change
 
 1. Go to claude.ai web UI
-2. Open a project (e.g., "Test Project")
-3. Edit the project description or instructions
-4. Save changes
+1. Open a project (e.g., "Test Project")
+1. Edit the project description or instructions
+1. Save changes
 
 ```bash
 ./claude_sync.py <org-uuid> -o /tmp/claude-sync-test -v
 ```
 
 **Expected**:
+
 - Only the modified project shows "Syncing <project>: updated"
 - Other projects show "Skipping: unchanged"
 - CLAUDE.md in that project folder is updated
@@ -56,30 +58,32 @@ cat /tmp/claude-sync-test/index.json
 ## Test 4: Document Content Change
 
 1. Go to claude.ai web UI
-2. Open a project
-3. Edit an existing document's content
-4. Save changes
+1. Open a project
+1. Edit an existing document's content
+1. Save changes
 
 ```bash
 ./claude_sync.py <org-uuid> -o /tmp/claude-sync-test -v
 ```
 
 **Expected**:
+
 - Project shows "Syncing: updated" (doc hash changed)
 - Document file is updated with new content
 
 ## Test 5: New Document Added
 
 1. Go to claude.ai web UI
-2. Open a project
-3. Click "Add document" and add a new file
-4. Save
+1. Open a project
+1. Click "Add document" and add a new file
+1. Save
 
 ```bash
 ./claude_sync.py <org-uuid> -o /tmp/claude-sync-test -v
 ```
 
 **Expected**:
+
 - Project resyncs
 - New document appears in `docs/` folder
 - docs_count in index.json increases
@@ -87,15 +91,16 @@ cat /tmp/claude-sync-test/index.json
 ## Test 6: Conversation Update
 
 1. Go to claude.ai web UI
-2. Open a project
-3. Open an existing conversation
-4. Send a new message and get a response
+1. Open a project
+1. Open an existing conversation
+1. Send a new message and get a response
 
 ```bash
 ./claude_sync.py <org-uuid> -o /tmp/claude-sync-test -v
 ```
 
 **Expected**:
+
 - Project resyncs (or just that conversation, depending on implementation)
 - Conversation file updated with new messages
 - conversations/index.json shows updated message_count
@@ -103,15 +108,16 @@ cat /tmp/claude-sync-test/index.json
 ## Test 7: New Conversation
 
 1. Go to claude.ai web UI
-2. Open a project
-3. Start a new conversation
-4. Have a brief exchange
+1. Open a project
+1. Start a new conversation
+1. Have a brief exchange
 
 ```bash
 ./claude_sync.py <org-uuid> -o /tmp/claude-sync-test -v
 ```
 
 **Expected**:
+
 - New conversation file appears in `conversations/`
 - conversations/index.json includes new conversation
 - Other conversations show "skipped" in verbose output
@@ -127,6 +133,7 @@ cat /tmp/claude-sync-test/index.json
 ```
 
 **Expected**:
+
 - With `--full`: All projects synced, all conversations fetched
 - Without `--full`: Only changed items synced
 
@@ -137,6 +144,7 @@ cat /tmp/claude-sync-test/index.json
 ```
 
 **Expected**:
+
 - Projects sync but conversations folder not created/updated
 - Much faster sync time
 
@@ -158,16 +166,19 @@ Comprehensive testing session validating incremental sync detection across all c
 ### Key Findings
 
 #### What updates project `updated_at`:
+
 - Project name change ✓
 - Project instructions (prompt_template) change ✓
 
 #### What does NOT update project `updated_at`:
+
 - New conversation
 - Message added to conversation
 - Conversation renamed
 - Doc changes (detected via content hash instead)
 
 ### Bugs Fixed in This Session
+
 - `claude-sync-655`: Conversations now checked independently (even when project `updated_at` unchanged)
 - `claude-sync-ivi`: Renames handled gracefully (old files/folders deleted automatically)
 - `claude-sync-l4u`: Atomic writes for state files (prevents corruption on interruption)
@@ -176,7 +187,9 @@ Comprehensive testing session validating incremental sync detection across all c
 ## Known Limitations
 
 ### Deleted Items (Tracked in claude-sync-daw)
+
 If you delete a project/document/conversation on claude.ai:
+
 - Orphaned files remain in local storage
 - Not automatically deleted (safety first)
 - Manual cleanup required
@@ -184,6 +197,7 @@ If you delete a project/document/conversation on claude.ai:
 **Future enhancement**: Orphan detection and cleanup with confirmation prompt.
 
 ### Deleted Projects
+
 - Deleted projects are marked as "orphaned" in index.json
 - Local files are NOT deleted (safety first)
 - Manual cleanup required
@@ -191,14 +205,17 @@ If you delete a project/document/conversation on claude.ai:
 ## Troubleshooting
 
 ### "Session expired" errors
+
 - Re-login to claude.ai in your browser
 - Close and reopen browser to refresh cookies
 
 ### Cloudflare blocks
+
 - The tool uses curl_cffi with Chrome impersonation
 - If blocked, try waiting a few minutes
 - Make sure your browser is actually logged in
 
 ### Sync state issues
+
 - Delete `.sync-state.json` in output dir to force fresh sync
 - Or use `--full` flag

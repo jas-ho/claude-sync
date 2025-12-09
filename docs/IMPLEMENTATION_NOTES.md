@@ -5,17 +5,20 @@ Notes collected during implementation for sanity check review.
 ## API Findings
 
 ### Cookie/Auth
+
 - `cf_clearance` cookie alone isn't enough - Cloudflare uses TLS fingerprinting
 - **Solution**: `curl_cffi` with `impersonate="chrome"` bypasses Cloudflare
 - Standard `requests` library and `curl` both get blocked
 
 ### Endpoints
+
 - `/api/organizations/{org}/projects` - returns list, but **NO prompt_template**
 - `/api/organizations/{org}/projects/{pid}` - returns full details including prompt_template
 - **Gotcha**: Must fetch each project individually to get instructions
 - Doc filename key is `file_name` (with underscore), not `filename`
 
 ### Bootstrap
+
 - `/api/bootstrap` returns user info including organization memberships
 - Works for org auto-discovery
 
@@ -41,6 +44,7 @@ Notes collected during implementation for sanity check review.
 ## Edge Cases Handled
 
 ### Filename Sanitization
+
 - Invalid chars: `<>:"/\|?*` and control chars → replaced with `-`
 - Windows reserved names (CON, PRN, etc.) → prefixed with `_`
 - Collisions after sanitization → numeric suffix `_1`, `_2`, etc.
@@ -48,6 +52,7 @@ Notes collected during implementation for sanity check review.
 - Long names → truncated with hash suffix
 
 ### Missing Data
+
 - No prompt_template → generates minimal CLAUDE.md with project name
 - No filename on doc → defaults to `untitled.md`
 - Missing extension → adds `.md`
@@ -55,16 +60,19 @@ Notes collected during implementation for sanity check review.
 ## Recent Features Added
 
 ### Status Command
+
 - Local status check (no auth required): sync age, counts, integrity check
 - Remote status check (`--remote`): detects new/modified/deleted projects and conversations
 - Document checking (`--check-docs`): thorough check for document changes (requires `--remote`)
 
 ### Error Handling Improvements
+
 - Failed project tracking: sync continues if individual projects fail
 - Stale lock detection: warns if lock file exists but process is dead
 - Better error messages with recovery instructions
 
 ### Standalone Conversations
+
 - Support for syncing conversations not attached to any project
 - `--include-standalone` flag to enable
 - Saved to `_standalone/` directory
@@ -89,6 +97,7 @@ Notes collected during implementation for sanity check review.
 ## Sanity Check Results (2025-12-07)
 
 **Verified:**
+
 - [x] 16 projects in index.json matches 16 directories
 - [x] CLAUDE.md content matches web UI prompt_template
 - [x] Projects without instructions show fallback message
@@ -99,6 +108,7 @@ Notes collected during implementation for sanity check review.
 - [x] ~18s for 16 projects (< 2 min target)
 
 **Example filename sanitization:**
+
 - `AGI 2.2 - -Long- timelines to advanced AI...` → preserved
 - `Why do people disagree about when powerful AI will arrive?` → `?` removed
 - Duplicates → `ai_emotional_dependency_research_strategy_1.md` (added `_1`)

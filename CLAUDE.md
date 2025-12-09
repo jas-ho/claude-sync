@@ -7,6 +7,7 @@
 Sync Claude web app projects (claude.ai) to local storage for use with Claude Code.
 
 **Key Use Cases:**
+
 - Access project docs locally (style guides, process docs)
 - Search conversation history
 - Make project instructions available in Claude Code
@@ -14,11 +15,13 @@ Sync Claude web app projects (claude.ai) to local storage for use with Claude Co
 ## Architecture
 
 Single UV script (`claude_sync.py`) with inline dependencies:
+
 - `curl_cffi` - API calls (Cloudflare bypass)
 - `browser-cookie3` - Session extraction from Edge/Chrome
 - `tqdm` - Progress display
 
 **Output**: Directory structure (not ZIP) for git tracking:
+
 ```
 <output-dir>/
 ├── .sync-state.json        # Internal sync state (timestamps, hashes)
@@ -51,18 +54,21 @@ Check sync health without running a full sync:
 ```
 
 **Local status shows:**
+
 - Last sync time and age
 - Project, document, conversation counts
 - Recently active projects
 - Integrity check (directories match manifest)
 
 **Remote comparison (`--remote`) detects:**
+
 - New projects on claude.ai
 - Modified project instructions
 - New/modified conversations
 - Deleted projects
 
 **Document checking (`--check-docs`):**
+
 - Detects new, modified, or deleted documents
 - Requires `--remote` flag
 - May be slow as it fetches all document metadata
@@ -101,6 +107,7 @@ uv run ./claude_sync.py status -o ./test-data
 ```
 
 **Why this matters:**
+
 - Avoids repeated permission prompts for `~/.local/share/` operations
 - `test-data/` is in `.gitignore` so test artifacts aren't committed
 - Sub-agents can run tests without needing user approval
