@@ -37,6 +37,7 @@ chmod +x claude_sync.py
 ```
 
 **Requirements:**
+
 - Python 3.12+
 - `uv` (the script uses inline dependency specification)
 - Logged into claude.ai in your browser (Edge or Chrome)
@@ -58,11 +59,11 @@ This will list all organizations you have access to.
 ### Method 2: Manual (via browser)
 
 1. Open [claude.ai](https://claude.ai) and log in
-2. Open browser DevTools (F12)
-3. Go to the **Network** tab
-4. Click on any project or refresh the page
-5. Look for requests to `https://claude.ai/api/organizations/`
-6. Copy the UUID from the URL (format: `f3e5048f-1380-4436-83cf-085832fff594`)
+1. Open browser DevTools (F12)
+1. Go to the **Network** tab
+1. Click on any project or refresh the page
+1. Look for requests to `https://claude.ai/api/organizations/`
+1. Copy the UUID from the URL (format: `f3e5048f-1380-4436-83cf-085832fff594`)
 
 ### Method 3: Environment variable
 
@@ -178,6 +179,7 @@ Standalone conversations are saved to the `_standalone/` directory at the root o
 ### File Formats
 
 **CLAUDE.md** - Project instructions with frontmatter:
+
 ```markdown
 ---
 synced_at: 2025-12-07T10:30:00+00:00
@@ -188,6 +190,7 @@ Your project instructions here...
 ```
 
 **meta.json** - Project metadata:
+
 ```json
 {
   "uuid": "abc-123",
@@ -199,7 +202,8 @@ Your project instructions here...
 }
 ```
 
-**conversations/*.md** - Conversation history in markdown:
+**conversations/\*.md** - Conversation history in markdown:
+
 ```markdown
 ---
 conversation_id: xyz-789
@@ -368,9 +372,10 @@ Or `.claude-sync.env` in your current directory.
 **Error:** `Permission denied accessing edge cookies`
 
 **Solution:**
+
 1. Close your browser completely
-2. On macOS: Grant Terminal/IDE access in **System Preferences > Security & Privacy > Privacy > Full Disk Access**
-3. Retry
+1. On macOS: Grant Terminal/IDE access in **System Preferences > Security & Privacy > Privacy > Full Disk Access**
+1. Retry
 
 **Error:** `Browser cookie database is locked`
 
@@ -379,18 +384,20 @@ Or `.claude-sync.env` in your current directory.
 **Error:** `Missing required cookie(s): sessionKey`
 
 **Solution:**
+
 1. Log into [claude.ai](https://claude.ai) in your browser
-2. Refresh the page
-3. Retry sync
+1. Refresh the page
+1. Retry sync
 
 ### Session expiry
 
 **Error:** `Session expired or invalid`
 
 **Solution:**
+
 1. Open claude.ai in your browser
-2. Log out and log back in
-3. Retry sync
+1. Log out and log back in
+1. Retry sync
 
 The session cookies expire periodically. Just re-authenticate in your browser.
 
@@ -405,9 +412,10 @@ The session cookies expire periodically. Just re-authenticate in your browser.
 **Error:** `API returned HTML instead of JSON` or `Cloudflare blocked the request`
 
 **Solution:**
+
 1. Wait a few minutes
-2. Verify claude.ai is accessible in your browser
-3. Retry
+1. Verify claude.ai is accessible in your browser
+1. Retry
 
 This usually resolves itself. The tool uses browser impersonation to minimize blocking.
 
@@ -416,6 +424,7 @@ This usually resolves itself. The tool uses browser impersonation to minimize bl
 **Error:** `Another sync is running (PID: 12345)`
 
 **Solution:**
+
 - Wait for the other sync to complete, or
 - If the PID is stale (process died), delete `~/.local/share/claude-sync/.claude-sync.lock`
 
@@ -424,6 +433,7 @@ This usually resolves itself. The tool uses browser impersonation to minimize bl
 **Error:** `Insufficient disk space`
 
 **Solution:**
+
 - Free up space, or
 - Use a different output directory: `-o /path/with/more/space`
 
@@ -513,14 +523,15 @@ MIT
 Contributions welcome! This is a single-file script, so changes are straightforward:
 
 1. Edit `claude_sync.py`
-2. Test locally
-3. Submit PR
+1. Test locally
+1. Submit PR
 
 Use [bd (beads)](https://github.com/steveyegge/beads) for issue tracking (see `AGENTS.md`).
 
 ## Support
 
 For issues or questions:
+
 - Check **Troubleshooting** section above
 - Review `docs/RESEARCH.md` for API details
 - Open an issue with `bd` or GitHub Issues

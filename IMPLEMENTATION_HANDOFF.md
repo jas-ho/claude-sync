@@ -16,6 +16,7 @@ Create a single-file Python script (`claude_sync.py`) that syncs Claude web app 
 ## Key Requirements
 
 1. **Single UV script** with inline dependencies:
+
    ```python
    #!/usr/bin/env -S uv run --script
    # /// script
@@ -24,7 +25,8 @@ Create a single-file Python script (`claude_sync.py`) that syncs Claude web app 
    # ///
    ```
 
-2. **Output structure**:
+1. **Output structure**:
+
    ```
    ~/.local/share/claude-sync/
    ├── index.json
@@ -35,7 +37,8 @@ Create a single-file Python script (`claude_sync.py`) that syncs Claude web app 
        └── conversations/      # Project conversations
    ```
 
-3. **CLI interface**:
+1. **CLI interface**:
+
    ```bash
    ./claude_sync.py <ORG_UUID> -o <output-dir> --browser edge
    ```
@@ -43,8 +46,8 @@ Create a single-file Python script (`claude_sync.py`) that syncs Claude web app 
 ## Critical Files to Read First
 
 1. `bd show claude-sync-8co` - Full MVP requirements
-2. `docs/RESEARCH.md` - API research, data structures, gotchas
-3. `reference/GIST_REFERENCE.md` - Original gist to build from
+1. `docs/RESEARCH.md` - API research, data structures, gotchas
+1. `reference/GIST_REFERENCE.md` - Original gist to build from
 
 ## High-Risk Areas (Read Task Descriptions!)
 
@@ -56,11 +59,11 @@ Create a single-file Python script (`claude_sync.py`) that syncs Claude web app 
 ## Workflow
 
 1. Claim task: `bd update <id> --status in_progress`
-2. Implement
-3. Test with real org UUID (user will provide)
-4. Close task: `bd close <id> --reason "Completed: <summary>"`
-5. Commit code + `.beads/issues.jsonl` together
-6. If you discover new issues: `bd create "..." --deps discovered-from:<current-task>`
+1. Implement
+1. Test with real org UUID (user will provide)
+1. Close task: `bd close <id> --reason "Completed: <summary>"`
+1. Commit code + `.beads/issues.jsonl` together
+1. If you discover new issues: `bd create "..." --deps discovered-from:<current-task>`
 
 ## API Endpoints
 

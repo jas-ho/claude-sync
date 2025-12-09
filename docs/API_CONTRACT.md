@@ -4,7 +4,7 @@ This document describes the assumed API response structure for claude-sync. The 
 
 **Last Updated:** 2025-12-09
 
----
+______________________________________________________________________
 
 ## Overview
 
@@ -51,7 +51,7 @@ The claude-sync tool relies on several undocumented Claude.ai API endpoints. The
 - UUID presence validated before adding to org list (line 520)
 - Missing fields handled gracefully with `.get()` and defaults
 
----
+______________________________________________________________________
 
 ## Projects List Endpoint
 
@@ -99,7 +99,7 @@ The claude-sync tool relies on several undocumented Claude.ai API endpoints. The
 
 **Line 1731:** `if filter_str in p["uuid"].lower()...` - Another direct access point.
 
----
+______________________________________________________________________
 
 ## Project Details Endpoint
 
@@ -147,7 +147,7 @@ The claude-sync tool relies on several undocumented Claude.ai API endpoints. The
 
 **Line 936:** `existing_uuid != project.get("uuid")` - Inconsistent: uses `.get()` here but direct access elsewhere
 
----
+______________________________________________________________________
 
 ## Project Documents Endpoint
 
@@ -195,7 +195,7 @@ The claude-sync tool relies on several undocumented Claude.ai API endpoints. The
 
 **Line 1016:** `doc_filename = doc.get("file_name") or doc.get("filename") or "untitled.md"` - Good defensive programming, handles API field name variations
 
----
+______________________________________________________________________
 
 ## Project Conversations Endpoint
 
@@ -233,7 +233,7 @@ The claude-sync tool relies on several undocumented Claude.ai API endpoints. The
 - UUID checked before processing (line 1814)
 - All fields use `.get()` with defaults - **NO CRASH RISK**
 
----
+______________________________________________________________________
 
 ## Conversation Details Endpoint
 
@@ -297,12 +297,13 @@ The claude-sync tool relies on several undocumented Claude.ai API endpoints. The
 ### Content Structure Evolution
 
 The code handles both old and new message formats:
+
 - **New format:** `content` array with typed blocks (`text`, `thinking`)
 - **Old format:** Plain `text` field
 
 This dual support (lines 1375-1394) provides backward compatibility.
 
----
+______________________________________________________________________
 
 ## All Conversations Endpoint
 
@@ -344,13 +345,14 @@ This dual support (lines 1375-1394) provides backward compatibility.
 ### Filtering Logic
 
 **Line 676-678:** Standalone conversations are those where:
+
 ```python
 not c.get("project_uuid") or c.get("project_uuid") not in project_uuids
 ```
 
 This means missing `project_uuid` is treated as standalone.
 
----
+______________________________________________________________________
 
 ## Summary of Critical Issues
 
@@ -364,11 +366,13 @@ This means missing `project_uuid` is treated as standalone.
 ### Medium Risk (Silent Failures)
 
 1. **Missing `updated_at`** - Breaks incremental sync:
+
    - Projects without `updated_at` get empty string, always appear unchanged
    - Conversations without `updated_at` always appear unchanged
    - Affects `project_needs_sync()` and `conversation_needs_sync()`
 
-2. **Missing `name`** - Affects slug generation:
+1. **Missing `name`** - Affects slug generation:
+
    - Falls back to "Unknown" or "Unnamed Project"
    - Could cause slug collisions if multiple unnamed projects exist
 
@@ -379,13 +383,14 @@ This means missing `project_uuid` is treated as standalone.
    - `file_name`, `content`
    - Conversation fields
 
----
+______________________________________________________________________
 
 ## Recommendations for Robustness
 
 ### Immediate Fixes
 
 1. **Replace direct UUID access** with validated `.get()`:
+
    ```python
    # Instead of: project_uuid = project["uuid"]
    project_uuid = project.get("uuid")
@@ -394,7 +399,8 @@ This means missing `project_uuid` is treated as standalone.
        continue
    ```
 
-2. **Validate response structure** before processing:
+1. **Validate response structure** before processing:
+
    ```python
    def validate_project(project: dict) -> bool:
        required = ["uuid"]
@@ -408,33 +414,36 @@ This means missing `project_uuid` is treated as standalone.
 ### Long-term Improvements
 
 1. **Schema validation** - Add JSON schema validation for API responses
-2. **Field versioning** - Track API response structure version in sync state
-3. **Defensive defaults** - Ensure all field access uses `.get()` consistently
-4. **Integration tests** - Mock API responses with missing fields to test resilience
+1. **Field versioning** - Track API response structure version in sync state
+1. **Defensive defaults** - Ensure all field access uses `.get()` consistently
+1. **Integration tests** - Mock API responses with missing fields to test resilience
 
----
+______________________________________________________________________
 
 ## Testing Recommendations
 
 To test resilience to API changes:
 
 1. **Mock responses with missing fields:**
+
    - Remove `uuid` from projects
    - Remove `updated_at` from projects/conversations
    - Remove `prompt_template` from project details
    - Remove `content` from documents
 
-2. **Test empty responses:**
+1. **Test empty responses:**
+
    - Empty project list `[]`
    - Empty document list `[]`
    - Empty conversation list `[]`
 
-3. **Test malformed responses:**
+1. **Test malformed responses:**
+
    - Wrong response types (dict instead of list, vice versa)
    - Null values in required fields
    - Missing nested structures
 
----
+______________________________________________________________________
 
 ## Change History
 

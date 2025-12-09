@@ -28,7 +28,8 @@ https://gist.github.com/jas-ho/f95abd89d4e007eac9ee821d7c2a3d0b
 ## Adaptation Notes
 
 For claude-sync, we modify this to:
+
 1. Output to directory (not ZIP) for git tracking
-2. Configurable output location
-3. Add incremental sync capability
-4. More robust filename handling
+1. Configurable output location
+1. Add incremental sync capability
+1. More robust filename handling

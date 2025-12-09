@@ -6,13 +6,14 @@ This document captures research findings and planning for a tool to sync Claude 
 
 **Key Finding**: Write operations to Claude.ai projects are **NOT possible** via API - only read operations work. This fundamentally constrains the architecture to **one-way sync (web → local)** with optional manual flagging for changes that need to be pushed back via the web UI.
 
----
+______________________________________________________________________
 
 ## 1. Research Findings
 
 ### 1.1 API Capabilities
 
 #### What's POSSIBLE (Read Operations)
+
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/organizations/{org}/projects` | List all projects |
@@ -22,6 +23,7 @@ This document captures research findings and planning for a tool to sync Claude 
 | `GET /api/organizations/{org}/chat_conversations/{cid}` | Full conversation history |
 
 #### What's NOT POSSIBLE (No Write Endpoints Found)
+
 - Create/update projects
 - Update project instructions (prompt_template)
 - Create/update/delete project docs
@@ -30,6 +32,7 @@ This document captures research findings and planning for a tool to sync Claude 
 **Conclusion**: Two-way sync is not feasible without browser automation or manual intervention.
 
 #### Authentication
+
 - Requires `sessionKey` cookie from browser (Edge/Chrome)
 - Session keys expire frequently
 - Uses `browser-cookie3` library for extraction
@@ -39,6 +42,7 @@ This document captures research findings and planning for a tool to sync Claude 
 From analysis of existing exports:
 
 **Projects** (`projects.json`):
+
 ```json
 {
   "uuid": "...",
@@ -61,6 +65,7 @@ From analysis of existing exports:
 ```
 
 **Conversations**:
+
 ```json
 {
   "uuid": "...",
@@ -84,6 +89,7 @@ From analysis of existing exports:
 ```
 
 **Key Metadata for Incremental Sync**:
+
 - `uuid` on all entities (stable identifiers)
 - `updated_at` on projects & conversations (enables change detection)
 - `created_at` timestamps (enables staleness detection)
@@ -100,11 +106,13 @@ From analysis of existing exports:
 | Which specific message changed | ❌ Not possible | Must re-download conversation |
 
 **Efficiency**: 95-97% bandwidth reduction with incremental sync:
+
 - Full sync: 29.7 MB, 30-60s
 - Daily incremental: ~0.5 MB, 2-5s
 - Weekly incremental: ~2 MB, 5-10s
 
 ### 1.4 Volume Analysis (Your Data)
+
 - 13 projects
 - 619 conversations, ~7000 messages
 - Date range: 2024-02-08 to 2025-04-03
@@ -113,12 +121,14 @@ From analysis of existing exports:
 ### 1.5 Claude Code Integration Patterns
 
 **Recommended Hierarchy** (from official docs):
+
 1. **CLAUDE.md imports** - `@path/to/file.md` syntax for external references
-2. **Skills** (`.claude/skills/`) - Auto-discovered by description matching
-3. **Slash Commands** (`.claude/commands/`) - User-invoked templates
-4. **MCP Servers** (`.mcp.json`) - Programmatic access to data
+1. **Skills** (`.claude/skills/`) - Auto-discovered by description matching
+1. **Slash Commands** (`.claude/commands/`) - User-invoked templates
+1. **MCP Servers** (`.mcp.json`) - Programmatic access to data
 
 **Best Practice for Synced Content**:
+
 ```
 project/
 ├── CLAUDE.md                    # Main instructions, imports synced content
@@ -133,11 +143,12 @@ project/
         └── docs/
 ```
 
----
+______________________________________________________________________
 
 ## 2. Use Cases (Prioritized)
 
 ### Tier 1: High Value, Low Effort (MVP)
+
 | Use Case | Value | Effort | Notes |
 |----------|-------|--------|-------|
 | **Access project docs locally** (style guides, process docs) | Very High | Low | Direct file sync |
@@ -145,6 +156,7 @@ project/
 | **Project instructions available in Claude Code** | High | Low | Export as CLAUDE.md |
 
 ### Tier 2: High Value, Medium Effort
+
 | Use Case | Value | Effort | Notes |
 |----------|-------|--------|-------|
 | **Incremental sync** (only fetch changes) | Medium | Medium | Track `updated_at` |
@@ -152,13 +164,14 @@ project/
 | **Auto-generate skills from project docs** | Medium | Medium | Template generation |
 
 ### Tier 3: Aspirational (High Effort or Blocked)
+
 | Use Case | Value | Effort | Notes |
 |----------|-------|--------|-------|
 | **Two-way sync** (local → web) | Very High | **Blocked** | No write API |
 | **Continue Claude Code conv in web app** | High | **Blocked** | Different systems |
 | **Agentic doc review/cleanup** | Medium | High | Separate project |
 
----
+______________________________________________________________________
 
 ## 3. Architecture Design
 
@@ -240,14 +253,14 @@ To enable incremental sync and prevent overwrites:
 Since we can't push changes back:
 
 1. **Track local modifications** via file hashes or mtime
-2. **On sync, if local modified**:
+1. **On sync, if local modified**:
    - Create backup: `CLAUDE.md.local-backup-{timestamp}`
    - Warn user: "Local changes exist - review before overwriting"
    - Optionally: show diff
-3. **Flag for manual push**: Create `.needs-push` marker files
-4. **Accept imperfection**: Some manual web UI work will be needed
+1. **Flag for manual push**: Create `.needs-push` marker files
+1. **Accept imperfection**: Some manual web UI work will be needed
 
----
+______________________________________________________________________
 
 ## 4. Implementation Phases
 
@@ -256,12 +269,14 @@ Since we can't push changes back:
 **Goal**: Get web app project content into Claude Code-friendly local structure
 
 **Features**:
+
 - [x] Direct fetch to organized directory structure (no ZIP intermediate)
 - [x] Generate CLAUDE.md for each project from `prompt_template`
 - [x] Create index/manifest for discoverability
 - [x] CLI: `claude-sync sync <org-id>` with typer framework
 
 **Output Structure**:
+
 ```
 ~/.local/share/claude-sync/
 ├── index.json
@@ -274,6 +289,7 @@ Since we can't push changes back:
 ```
 
 **Integration**: Add to `~/.claude/CLAUDE.md`:
+
 ```markdown
 # Synced Web App Projects
 @~/.local/share/claude-sync/apart-lab-general/CLAUDE.md
@@ -284,21 +300,24 @@ Since we can't push changes back:
 **Goal**: Only fetch what changed
 
 **Features**:
+
 - [x] Store sync state (last sync time, remote `updated_at` in `.sync-state.json`)
 - [x] Compare timestamps before fetching full content
 - [x] Fetch only modified projects/docs
 - [x] CLI: incremental sync by default, `--full` flag to force full sync
 
 **API Strategy**:
+
 1. Fetch project list (lightweight)
-2. Compare `updated_at` with stored state
-3. Only fetch full content for changed projects
+1. Compare `updated_at` with stored state
+1. Only fetch full content for changed projects
 
 ### Phase 3: Local Change Tracking - "Safe Sync" [PARTIALLY COMPLETED]
 
 **Goal**: Don't lose local edits
 
 **Features**:
+
 - [x] Hash tracking for documents (in `.sync-state.json`)
 - [x] Backup mechanism (`.backup/` directory with timestamped files)
 - [x] CLI: `claude-sync status` (show local status and remote changes)
@@ -310,6 +329,7 @@ Since we can't push changes back:
 **Goal**: Richer Claude Code experience
 
 **Options** (choose based on need):
+
 - [ ] MCP server for dynamic project access
 - [ ] Auto-generate skills from project docs
 - [ ] Conversation search tool
@@ -320,12 +340,13 @@ Since we can't push changes back:
 **Goal**: Intelligent content management
 
 **Features**:
+
 - [ ] Detect redundant/overlapping docs
 - [ ] Flag potentially outdated content (by age, similarity)
 - [ ] Suggest consolidation
 - [ ] Works on any doc corpus (not just web app syncs)
 
----
+______________________________________________________________________
 
 ## 5. Technical Considerations
 
@@ -342,6 +363,7 @@ Since we can't push changes back:
 ### 5.2 Filename Sanitization
 
 Need to handle:
+
 - Forward slash `/`
 - Backslash `\`
 - Colon `:`
@@ -361,26 +383,26 @@ Need to handle:
 - "Red team" agent pass for edge cases
 - Manual testing with real data (your exports)
 
----
+______________________________________________________________________
 
 ## 6. Open Questions
 
 1. **Conversation sync depth**: All conversations or just recent N? Project-associated only?
-2. **Storage location**: `~/.local/share/claude-sync/` vs project-local?
-3. **MCP vs static files**: Is dynamic MCP access worth the complexity?
-4. **Multi-org support**: Handle multiple organizations?
-5. **Automation**: Run on schedule (launchd/cron) or manual only?
+1. **Storage location**: `~/.local/share/claude-sync/` vs project-local?
+1. **MCP vs static files**: Is dynamic MCP access worth the complexity?
+1. **Multi-org support**: Handle multiple organizations?
+1. **Automation**: Run on schedule (launchd/cron) or manual only?
 
----
+______________________________________________________________________
 
 ## 7. Next Steps
 
 1. **Decide on Phase 1 scope** - What's the minimal useful version?
-2. **Enhance existing gist** or **start fresh**?
-3. **Choose storage location** and integration pattern
-4. **Implement MVP** with good logging/metadata for future phases
+1. **Enhance existing gist** or **start fresh**?
+1. **Choose storage location** and integration pattern
+1. **Implement MVP** with good logging/metadata for future phases
 
----
+______________________________________________________________________
 
 ## Appendix: Existing Assets
 
