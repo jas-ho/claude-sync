@@ -76,6 +76,16 @@ echo "CLAUDE_ORG_UUID=your-uuid-here" > ~/.claude-sync.env
 
 Then just run `./claude_sync.py` without arguments.
 
+### Troubleshooting: "Resource not found" (404) errors
+
+If you get a 404 error on the `/api/organizations/.../projects` endpoint, the most likely cause is an **account mismatch**:
+
+- The script extracts session cookies from your browser (Edge/Chrome)
+- If you've switched Claude accounts in that browser since setting up the org UUID, the cookies won't match
+- **Fix:** Run `./claude_sync.py --list-orgs` to see which org your current session has access to, then update your config
+
+This commonly happens with scheduled automation (launchd/cron) when you log into a different Claude account in your browser.
+
 ## Usage
 
 ### Basic Sync
