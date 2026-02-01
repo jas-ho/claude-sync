@@ -17,6 +17,10 @@ venv/
 *.swp
 *.swo
 
+# Claude Code local settings (personal permission overrides)
+.claude/settings.local.json
+.claude/settings.local.json.backup
+
 # OS
 .DS_Store
 Thumbs.db
