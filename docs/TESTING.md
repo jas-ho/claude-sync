@@ -165,12 +165,12 @@ Comprehensive testing session validating incremental sync detection across all c
 
 ### Key Findings
 
-#### What updates project `updated_at`:
+#### What updates project `updated_at`
 
 - Project name change ✓
 - Project instructions (prompt_template) change ✓
 
-#### What does NOT update project `updated_at`:
+#### What does NOT update project `updated_at`
 
 - New conversation
 - Message added to conversation

@@ -406,7 +406,7 @@ ______________________________________________________________________
 
 ## Appendix: Existing Assets
 
-- **Gist**: https://gist.github.com/jas-ho/f95abd89d4e007eac9ee821d7c2a3d0b
-- **Local export**: `/Users/jason/Documents/Claude migration/`
+- **Gist**: <https://gist.github.com/jas-ho/f95abd89d4e007eac9ee821d7c2a3d0b>
+- **Local export**: Local directory with exported Claude data
 - **Processing scripts**: `process_projects.py`, `extract_metadata.py`
 - **Sample processed**: `processed_projects_DONE/`

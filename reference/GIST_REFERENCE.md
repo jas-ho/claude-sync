@@ -1,7 +1,7 @@
 # Original Gist Reference
 
 The claude-sync project is based on this gist:
-https://gist.github.com/jas-ho/f95abd89d4e007eac9ee821d7c2a3d0b
+<https://gist.github.com/jas-ho/f95abd89d4e007eac9ee821d7c2a3d0b>
 
 ## Key Features from Gist
 
@@ -9,6 +9,7 @@ https://gist.github.com/jas-ho/f95abd89d4e007eac9ee821d7c2a3d0b
 - Browser cookie extraction (Edge/Chrome)
 - Parallel chat fetching (MAX_WORKERS=16)
 - Exports to ZIP with structure:
+
   ```
   projects/
   ├── <name-slug>-<uuid>/

@@ -51,7 +51,7 @@ uv run --with pytest pytest tests/test_core_functions.py::TestSanitizeFilename::
   - Format differences (Z vs +00:00)
   - Timezone handling
   - None/empty string handling
-  - Unparseable fallback
+  - Unparsable fallback
 
 ### Core Sync Logic
 
@@ -71,12 +71,14 @@ uv run --with pytest pytest tests/test_core_functions.py::TestSanitizeFilename::
 ## Design Philosophy
 
 These tests focus on **high-value scenarios** that:
+
 1. Catch real cross-platform issues (Windows reserved names, path safety)
 2. Verify incremental sync correctness (avoiding unnecessary re-syncs)
 3. Test edge cases in string handling (unicode, line endings, collisions)
 4. Are pure functions requiring no API mocking
 
 Tests deliberately avoid:
+
 - Low-value "coverage for coverage's sake" tests
 - Functions requiring complex API mocking
 - Trivial getters/setters
