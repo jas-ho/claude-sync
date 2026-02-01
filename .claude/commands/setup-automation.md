@@ -5,6 +5,7 @@ Help the user set up scheduled automatic syncing of their Claude.ai projects.
 ## Overview
 
 This command helps configure periodic automatic syncing using the platform's native scheduler:
+
 - **macOS**: launchd (recommended) or cron
 - **Linux**: systemd user timers or cron
 - **Windows**: Task Scheduler
@@ -12,6 +13,7 @@ This command helps configure periodic automatic syncing using the platform's nat
 ## CLI Reference
 
 **IMPORTANT**: The correct CLI flags for claude_sync.py are:
+
 - `--dry-run` - validate config and auth without syncing (use this to test!)
 - `--include-standalone` (NOT `--standalone`) - include conversations not in projects
 - `-o PATH` or `--output PATH` - custom output directory
@@ -27,6 +29,7 @@ Run `uv run --script claude_sync.py sync --help` to see all options.
 ### 1. Gather requirements
 
 Ask the user:
+
 - **Sync frequency**: How often should sync run? (hourly, daily, or custom interval in minutes)
 - **Organization UUID**: Check `~/.local/share/claude-sync/index.json` for existing orgs (look in the `orgs` key), or `~/.claude-sync.env`, or ask the user
 - **Include standalone conversations?**: Whether to sync conversations not attached to projects (uses `--include-standalone` flag)
@@ -76,6 +79,7 @@ Generate a plist file for `~/Library/LaunchAgents/com.claude-sync.plist`:
 ```
 
 For daily sync, use `StartCalendarInterval` instead:
+
 ```xml
 <key>StartCalendarInterval</key>
 <dict>
@@ -87,6 +91,7 @@ For daily sync, use `StartCalendarInterval` instead:
 ```
 
 **Installation commands:**
+
 ```bash
 # Create log directory
 mkdir -p ~/Library/Logs/claude-sync
@@ -102,6 +107,7 @@ launchctl list | grep claude-sync
 ```
 
 **Management commands to share:**
+
 ```bash
 # Check status
 launchctl list | grep claude-sync
@@ -125,6 +131,7 @@ rm ~/Library/LaunchAgents/com.claude-sync.plist
 Generate two files in `~/.config/systemd/user/`:
 
 **claude-sync.service:**
+
 ```ini
 [Unit]
 Description=Sync Claude.ai projects
@@ -139,6 +146,7 @@ WantedBy=default.target
 ```
 
 **claude-sync.timer:**
+
 ```ini
 [Unit]
 Description=Run claude-sync periodically
@@ -155,6 +163,7 @@ For daily: `OnCalendar=*-*-* 02:00:00`
 For custom minutes: `OnUnitActiveSec=30min`
 
 **Installation commands:**
+
 ```bash
 # Create directory
 mkdir -p ~/.config/systemd/user
@@ -206,6 +215,7 @@ uv run --script /path/to/claude_sync.py ORG_UUID --dry-run --include-standalone
 ```
 
 The `--dry-run` flag:
+
 - Extracts browser cookies (tests auth)
 - Connects to Claude.ai API (tests network/session)
 - Lists projects that would be synced
@@ -227,6 +237,7 @@ If the dry-run succeeds, the automated sync will work. If it fails, debug before
 ### 5. Provide ongoing management info
 
 After setup, remind user:
+
 - Where logs are stored
 - How to check if sync is running
 - How to temporarily disable
@@ -244,6 +255,7 @@ After setup, remind user:
 ## Expected User Experience
 
 User runs `/setup-automation` and:
+
 1. Gets asked about sync frequency preference
 2. Sees the generated configuration with explanation
 3. Confirms before any files are written

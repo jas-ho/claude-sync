@@ -283,7 +283,7 @@ def timestamps_equal(ts1: str | None, ts2: str | None) -> bool:
     Handles cases like:
     - 2024-01-15T10:30:00Z vs 2024-01-15T10:30:00+00:00 (same time, different format)
     - None/empty values
-    - Unparseable timestamps (falls back to string comparison)
+    - Unparsable timestamps (falls back to string comparison)
 
     Args:
         ts1: First timestamp string

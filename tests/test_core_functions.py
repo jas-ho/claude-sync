@@ -403,8 +403,8 @@ class TestTimestampsEqual:
         assert timestamps_equal("", "") is True
         assert timestamps_equal("", "2024-01-15T10:30:00Z") is False
 
-    def test_unparseable_fallback(self):
-        """Unparseable timestamps should fall back to string comparison."""
+    def test_unparsable_fallback(self):
+        """Unparsable timestamps should fall back to string comparison."""
         invalid1 = "not-a-timestamp"
         invalid2 = "also-not-a-timestamp"
 

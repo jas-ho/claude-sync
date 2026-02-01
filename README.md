@@ -477,6 +477,7 @@ This usually resolves itself. The tool uses browser impersonation to minimize bl
 #### Claude Code users
 
 Use the `/setup-automation` slash command in Claude Code for an interactive setup that supports:
+
 - macOS (launchd)
 - Linux (systemd user timers or cron)
 - Windows (Task Scheduler)
