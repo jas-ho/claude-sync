@@ -42,3 +42,7 @@ history/
 /tmp/
 *.log
 test-data/
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
