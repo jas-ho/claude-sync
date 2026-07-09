@@ -1029,7 +1029,7 @@ def write_project_output(
     docs: list[dict],
     output_dir: Path,
     prev_state: dict | None = None,
-) -> Path:
+) -> tuple[Path, dict[str, str]]:
     """Write project data to output directory structure.
 
     Creates:
@@ -1045,7 +1045,7 @@ def write_project_output(
         prev_state: Previous sync state for rename detection
 
     Returns:
-        Path to created project directory
+        Tuple of (project directory path, map of doc UUID -> filename written)
     """
     from datetime import datetime, timezone
 
@@ -1149,15 +1149,19 @@ _No project instructions defined._
     log.debug(f"Wrote {meta_path}")
 
     # Write docs
-    if docs:
-        docs_dir = project_dir / "docs"
-        docs_dir.mkdir(exist_ok=True)
+    docs_dir = project_dir / "docs"
+    # Map of doc UUID -> filename actually written this run (post sanitize/dedup);
+    # recorded in sync state so cleanup can target the real local file
+    written_map: dict[str, str] = {}
 
-        # Get previous doc state for rename detection
-        prev_docs = {}
-        if prev_state:
-            prev_project = prev_state.get("projects", {}).get(project_uuid, {})
-            prev_docs = prev_project.get("docs", {})
+    # Get previous doc state for rename detection and orphan cleanup
+    prev_docs = {}
+    if prev_state:
+        prev_project = prev_state.get("projects", {}).get(project_uuid, {})
+        prev_docs = prev_project.get("docs", {})
+
+    if docs:
+        docs_dir.mkdir(exist_ok=True)
 
         used_filenames: set[str] = set()
         # Paths written this run, lowercased because APFS is case-insensitive;
@@ -1192,9 +1196,12 @@ _No project instructions defined._
             if doc_uuid and doc_uuid in prev_docs:
                 prev_filename = prev_docs[doc_uuid].get("filename", "")
                 if prev_filename and prev_filename != doc_filename:
-                    # Doc was renamed - delete old file
-                    prev_safe = sanitize_filename(prev_filename)
-                    prev_safe = ensure_md_extension(prev_safe)
+                    # Doc was renamed - delete old file. Prefer the recorded
+                    # written filename; fall back to re-deriving it for state
+                    # entries from before "written" was tracked.
+                    prev_safe = prev_docs[doc_uuid].get(
+                        "written"
+                    ) or ensure_md_extension(sanitize_filename(prev_filename))
                     old_doc_path = docs_dir / prev_safe
                     # Validate path doesn't escape docs directory
                     if not validate_path_within_directory(old_doc_path, docs_dir):
@@ -1216,18 +1223,25 @@ _No project instructions defined._
             backup_file(doc_path, backup_dir)
             doc_path.write_text(content, encoding="utf-8")
             written_paths_ci.add(str(doc_path).lower())
+            if doc_uuid:
+                written_map[doc_uuid] = unique_filename
             log.debug(f"Wrote {doc_path}")
 
-        # Detect deleted docs
+    # Detect deleted docs. Runs even when the current doc list is empty, so a
+    # project emptied on claude.ai gets its stale local files cleaned up.
+    if prev_docs and docs_dir.exists():
+        written_paths_ci_all = {str(docs_dir / f).lower() for f in written_map.values()}
         current_doc_uuids = {doc.get("uuid", "") for doc in docs if doc.get("uuid")}
         for prev_uuid, prev_data in prev_docs.items():
             if prev_uuid not in current_doc_uuids:
                 # Doc was deleted remotely
                 prev_filename = prev_data.get("filename", "")
-                if prev_filename:
-                    # Apply same sanitization as when writing
-                    prev_safe = sanitize_filename(prev_filename)
-                    prev_safe = ensure_md_extension(prev_safe)
+                prev_safe = prev_data.get("written") or (
+                    ensure_md_extension(sanitize_filename(prev_filename))
+                    if prev_filename
+                    else ""
+                )
+                if prev_safe:
                     old_doc_path = docs_dir / prev_safe
                     # Validate path doesn't escape docs directory
                     if not validate_path_within_directory(old_doc_path, docs_dir):
@@ -1235,7 +1249,7 @@ _No project instructions defined._
                             f"Skipping suspicious filename in state: {prev_filename}"
                         )
                         continue
-                    if str(old_doc_path).lower() in written_paths_ci:
+                    if str(old_doc_path).lower() in written_paths_ci_all:
                         log.debug(
                             f"Skipping orphan deletion of {prev_filename}: filename reused by a re-uploaded doc"
                         )
@@ -1244,7 +1258,7 @@ _No project instructions defined._
                         old_doc_path.unlink()
                         log.info(f"Deleted orphaned doc: {prev_filename}")
 
-    return project_dir
+    return project_dir, written_map
 
 
 def write_index(
@@ -1253,7 +1267,7 @@ def write_index(
     org_uuid: str,
     synced_at: str,
     orphaned_projects: list[dict] | None = None,
-    standalone_count: int = 0,
+    standalone_count: int | None = None,
     org_name: str = "Unknown",
 ) -> None:
     """Write index.json manifest file with multi-org support.
@@ -1264,7 +1278,9 @@ def write_index(
         org_uuid: Organization UUID
         synced_at: ISO timestamp of sync
         orphaned_projects: List of projects deleted remotely but kept locally
-        standalone_count: Number of standalone conversations synced
+        standalone_count: Number of standalone conversations tracked, or None
+            if standalone conversations were not synced this run (preserves
+            the previous index section)
         org_name: Organization name (from bootstrap API)
     """
     index_path = output_dir / "index.json"
@@ -1306,8 +1322,14 @@ def write_index(
     if "orgs" not in existing_index:
         existing_index = {"orgs": {}}
 
-    # Build current org data
-    projects_dict = {}
+    # Build current org data. Start from the existing org entry's projects so
+    # runs that don't touch every project (--project filter, interrupts) don't
+    # drop the others from the index; current data overwrites per-project.
+    # Deliberate: projects that FAILED this run also keep their previous
+    # entry — the index catalogs the local mirror, and a failed sync leaves
+    # the previously synced local files in place.
+    prev_org_data = existing_index["orgs"].get(org_uuid, {})
+    projects_dict = dict(prev_org_data.get("projects", {}))
     for project in projects:
         project_uuid = project["uuid"]
         project_name = project.get("name", "Unnamed Project")
@@ -1343,8 +1365,14 @@ def write_index(
         "projects": projects_dict,
     }
 
-    # Add standalone conversations section if any
-    if standalone_count > 0:
+    # Standalone conversations section: None = not synced this run (preserve
+    # previous section); an int is authoritative (0 clears the section)
+    if standalone_count is None:
+        if "standalone_conversations" in prev_org_data:
+            org_data["standalone_conversations"] = prev_org_data[
+                "standalone_conversations"
+            ]
+    elif standalone_count > 0:
         org_data["standalone_conversations"] = {
             "count": standalone_count,
             "path": "_standalone/",
@@ -1428,7 +1456,7 @@ def save_sync_state(output_dir: Path, state: dict) -> None:
 
 
 def project_needs_sync(
-    project: dict, docs: list[dict], prev_state: dict
+    project: dict, docs: list[dict], prev_state: dict, project_dir: Path | None = None
 ) -> tuple[bool, str]:
     """Check if project needs to be synced.
 
@@ -1436,6 +1464,8 @@ def project_needs_sync(
         project: Current project metadata from API
         docs: Current docs from API
         prev_state: Previous sync state
+        project_dir: Local project directory; when given, docs missing on disk
+            trigger a sync even if state says they're in sync (self-healing)
 
     Returns:
         Tuple of (needs_sync: bool, reason: str)
@@ -1445,6 +1475,14 @@ def project_needs_sync(
 
     if not prev_project:
         return True, "new project"
+
+    # Self-heal: core project files gone locally (also covers doc-less
+    # projects whose directory was removed)
+    if project_dir is not None and (
+        not (project_dir / "CLAUDE.md").exists()
+        or not (project_dir / "meta.json").exists()
+    ):
+        return True, "local project files missing"
 
     # Check project updated_at timestamp
     current_updated = project.get("updated_at", "")
@@ -1464,7 +1502,7 @@ def project_needs_sync(
     if len(docs) != prev_doc_count:
         return True, f"doc count changed ({prev_doc_count} → {len(docs)})"
 
-    # Check doc content hashes
+    # Check doc content hashes, filenames, and local presence
     prev_docs = prev_project.get("docs", {})
     for doc in docs:
         doc_uuid = doc.get("uuid", "")
@@ -1474,6 +1512,22 @@ def project_needs_sync(
         prev_doc = prev_docs.get(doc_uuid, {})
         if prev_doc.get("hash") != current_hash:
             return True, "doc content changed"
+
+        current_filename = doc.get("file_name") or doc.get("filename") or ""
+        if prev_doc.get("filename", "") != current_filename:
+            return True, "doc renamed"
+
+        # Self-heal: state says synced, but the file is gone locally.
+        # Oversized docs are intentionally never written; don't loop on them.
+        if project_dir is not None:
+            content_size_mb = len(content.encode("utf-8")) / (1024 * 1024)
+            if content_size_mb <= MAX_DOC_SIZE_MB:
+                # Fallback mirrors the writer: ensure_md_extension then sanitize
+                written = prev_doc.get("written") or sanitize_filename(
+                    ensure_md_extension(current_filename or "untitled.md")
+                )
+                if not (project_dir / "docs" / written).exists():
+                    return True, f"local file missing ({written})"
 
     return False, "unchanged"
 
@@ -1495,16 +1549,37 @@ def detect_deleted_projects(
     return list(prev_uuids - current_uuids)
 
 
-def build_project_state(project: dict, docs: list[dict]) -> dict:
-    """Build sync state entry for a project."""
+def build_project_state(
+    project: dict,
+    docs: list[dict],
+    written_map: dict[str, str] | None = None,
+    prev_docs: dict | None = None,
+) -> dict:
+    """Build sync state entry for a project.
+
+    Args:
+        project: Full project dict from API
+        docs: Current docs from API
+        written_map: Doc UUID -> filename actually written this run
+        prev_docs: Previous state's docs dict, to carry forward "written"
+            filenames for docs that were not rewritten this run
+    """
+    written_map = written_map or {}
+    prev_docs = prev_docs or {}
     doc_states = {}
     for doc in docs:
         doc_uuid = doc.get("uuid", "")
         if doc_uuid:
-            doc_states[doc_uuid] = {
+            entry = {
                 "hash": compute_doc_hash(doc.get("content", "")),
                 "filename": doc.get("file_name") or doc.get("filename", ""),
             }
+            written = written_map.get(doc_uuid) or prev_docs.get(doc_uuid, {}).get(
+                "written", ""
+            )
+            if written:
+                entry["written"] = written
+            doc_states[doc_uuid] = entry
 
     state = {
         "name": project.get("name", "Unknown"),
@@ -1713,6 +1788,10 @@ def write_conversation_output(
             # Validate path doesn't escape conversations directory
             if not validate_path_within_directory(old_convo_path, convos_dir):
                 log.warning(f"Skipping suspicious filename in state: {prev_filename}")
+            elif prev_filename.lower() in {f.lower() for f in used_filenames}:
+                log.debug(
+                    f"Skipping rename cleanup of {prev_filename}: filename in use by another conversation this run"
+                )
             elif old_convo_path.exists():
                 log.info(
                     f"Conversation renamed: '{prev_filename}' -> '{filename}', removing old file"
@@ -1930,8 +2009,8 @@ def sync_conversations(
         Dict mapping conversation UUID to conversation metadata
     """
     convo_list = fetch_project_conversations(session, org_uuid, project_uuid)
-    if not convo_list:
-        return {}
+    # NOTE: an empty convo_list still proceeds, so conversations deleted
+    # remotely get their stale local files cleaned up below.
 
     # Get previous conversation state for incremental sync
     prev_project_state = prev_state.get("projects", {}).get(project_uuid, {})
@@ -1942,57 +2021,131 @@ def sync_conversations(
     used_convo_filenames: set[str] = set()
     convo_index: dict[str, dict] = {}
 
+    # First pass: decide skip vs sync. Skipped conversations reserve their
+    # filenames up front so a same-named new/changed conversation can't
+    # overwrite them, and a skipped conversation whose local file is missing
+    # (e.g. after a project rename recreated the directory) is re-synced.
+    to_sync: list[dict] = []
     for convo_meta in convo_list:
         convo_uuid = convo_meta.get("uuid")
         if not convo_uuid:
             continue
 
-        # Check if conversation needs sync (incremental)
         convo_needs_sync, convo_reason = conversation_needs_sync(
             convo_meta, prev_convos, config.full_sync
         )
 
-        if convo_needs_sync:
-            try:
-                # Ensure project directory exists before writing conversations
-                project_dir.mkdir(parents=True, exist_ok=True)
+        if not convo_needs_sync:
+            prev_entry = prev_convos.get(convo_uuid, {})
+            prev_filename = prev_entry.get("filename", "")
+            # filename "" means "no local file expected" (empty or oversized
+            # conversation): keep the skip without an existence check
+            if "filename" in prev_entry and (
+                not prev_filename
+                or (project_dir / "conversations" / prev_filename).exists()
+            ):
+                if prev_filename:
+                    used_convo_filenames.add(prev_filename)
+                convo_index[convo_uuid] = prev_entry
+                convos_skipped += 1
+                metrics["conversations_skipped"] += 1
+                continue
+            # State says synced but the file is gone locally: re-sync
+            convo_needs_sync = True
 
-                full_convo = fetch_conversation(session, org_uuid, convo_uuid)
+        to_sync.append(convo_meta)
 
-                # Check conversation size before processing
-                message_count = len(full_convo.get("chat_messages", []))
-                if message_count > MAX_CONVERSATION_MESSAGES:
-                    log.warning(
-                        f"Skipping conversation '{convo_meta.get('name')}': {message_count} messages exceeds {MAX_CONVERSATION_MESSAGES} limit"
-                    )
-                    convos_skipped += 1
-                    continue
+    # Second pass: fetch and write the conversations that need it
+    for convo_meta in to_sync:
+        convo_uuid = convo_meta.get("uuid")
+        try:
+            # Ensure project directory exists before writing conversations
+            project_dir.mkdir(parents=True, exist_ok=True)
 
-                filename = write_conversation_output(
-                    full_convo, project_dir, used_convo_filenames, prev_convos
+            full_convo = fetch_conversation(session, org_uuid, convo_uuid)
+
+            # Check conversation size before processing
+            message_count = len(full_convo.get("chat_messages", []))
+            if message_count > MAX_CONVERSATION_MESSAGES:
+                log.warning(
+                    f"Skipping conversation '{convo_meta.get('name')}': {message_count} messages exceeds {MAX_CONVERSATION_MESSAGES} limit"
                 )
-                if filename:
-                    convo_index[convo_uuid] = {
-                        "name": convo_meta.get("name", "Untitled"),
-                        "filename": filename,
-                        "created_at": convo_meta.get("created_at"),
-                        "updated_at": convo_meta.get("updated_at"),
-                        "message_count": len(full_convo.get("chat_messages", [])),
-                    }
-                    convos_synced += 1
-                    metrics["conversations_synced"] += 1
-            except (APIError, FileNotFoundError) as e:
-                log.warning(f"Failed to fetch conversation {convo_uuid}: {e}")
-        else:
-            # Keep previous index entry for unchanged conversations
-            if convo_uuid in prev_convos:
-                convo_index[convo_uuid] = prev_convos[convo_uuid]
-            convos_skipped += 1
-            metrics["conversations_skipped"] += 1
+                # Record current state anyway (with any previously written file
+                # that still exists, or filename "" meaning "no local file
+                # expected") so the next run doesn't refetch just to skip again
+                prev_oversized_filename = prev_convos.get(convo_uuid, {}).get(
+                    "filename", ""
+                )
+                if prev_oversized_filename and (
+                    prev_oversized_filename.lower()
+                    in {f.lower() for f in used_convo_filenames}
+                ):
+                    # Another conversation claimed this name earlier this run;
+                    # don't point two conversations at the same file
+                    prev_oversized_filename = ""
+                elif (
+                    prev_oversized_filename
+                    and not (
+                        project_dir / "conversations" / prev_oversized_filename
+                    ).exists()
+                ):
+                    prev_oversized_filename = ""
+                if prev_oversized_filename:
+                    # Reserve it so a same-named conversation can't claim it
+                    used_convo_filenames.add(prev_oversized_filename)
+                convo_index[convo_uuid] = {
+                    "name": convo_meta.get("name", "Untitled"),
+                    "filename": prev_oversized_filename,
+                    "created_at": convo_meta.get("created_at"),
+                    "updated_at": convo_meta.get("updated_at"),
+                    "message_count": message_count,
+                }
+                convos_skipped += 1
+                continue
+
+            filename = write_conversation_output(
+                full_convo, project_dir, used_convo_filenames, prev_convos
+            )
+            if not filename:
+                # Conversation is now empty: remove a previously written file
+                # so it doesn't linger unreachable by future cleanup
+                prev_empty_filename = prev_convos.get(convo_uuid, {}).get(
+                    "filename", ""
+                )
+                if prev_empty_filename and prev_empty_filename.lower() not in {
+                    f.lower() for f in used_convo_filenames
+                }:
+                    stale_path = project_dir / "conversations" / prev_empty_filename
+                    if (
+                        validate_path_within_directory(
+                            stale_path, project_dir / "conversations"
+                        )
+                        and stale_path.exists()
+                    ):
+                        stale_path.unlink()
+                        log.info(
+                            f"Deleted file of now-empty conversation: {prev_empty_filename}"
+                        )
+            convo_index[convo_uuid] = {
+                "name": convo_meta.get("name", "Untitled"),
+                # filename "" = empty conversation, no local file expected
+                "filename": filename or "",
+                "created_at": convo_meta.get("created_at"),
+                "updated_at": convo_meta.get("updated_at"),
+                "message_count": message_count,
+            }
+            if filename:
+                convos_synced += 1
+                metrics["conversations_synced"] += 1
+        except (APIError, FileNotFoundError) as e:
+            log.warning(f"Failed to fetch conversation {convo_uuid}: {e}")
 
     # Detect deleted conversations
     current_convo_uuids = {c.get("uuid") for c in convo_list}
     conversations_dir = project_dir / "conversations"
+    # Filenames kept or written this run must never be orphan-deleted, even if
+    # a deleted conversation's old file had the same name (case-insensitive)
+    active_filenames_ci = {f.lower() for f in used_convo_filenames}
     for prev_uuid, prev_data in prev_convos.items():
         if prev_uuid not in current_convo_uuids:
             # Conversation was deleted remotely
@@ -2005,14 +2158,22 @@ def sync_conversations(
                         f"Skipping suspicious filename in state: {prev_filename}"
                     )
                     continue
+                if prev_filename.lower() in active_filenames_ci:
+                    log.debug(
+                        f"Skipping orphan deletion of {prev_filename}: filename in use by a current conversation"
+                    )
+                    continue
                 if old_file.exists():
                     old_file.unlink()
                     log.info(f"Deleted orphaned conversation: {prev_filename}")
 
-    # Write conversation index
+    # Write conversation index. Also rewrite when it exists but the current
+    # index is empty, so a fully-emptied project doesn't keep a stale index.
     if convo_index:
         project_dir.mkdir(parents=True, exist_ok=True)
         write_conversation_index(project_dir, convo_index, synced_at)
+    elif (project_dir / "conversations" / "index.json").exists():
+        write_conversation_index(project_dir, {}, synced_at)
 
     if convos_skipped > 0:
         log.debug(f"Conversations: {convos_synced} synced, {convos_skipped} skipped")
@@ -2183,15 +2344,18 @@ def sync_project(
         full_project["_docs_count"] = len(docs)
 
         # Check if sync needed (incremental)
-        needs_sync, reason = project_needs_sync(full_project, docs, prev_state)
+        needs_sync, reason = project_needs_sync(
+            full_project, docs, prev_state, project_dir
+        )
 
         # Track if we actually synced anything for this project
         project_synced = False
+        written_map: dict[str, str] = {}
 
         # Sync project metadata and docs if needed
         if needs_sync or config.full_sync:
             log.debug(f"Syncing {project_name}: {reason}")
-            project_dir = write_project_output(
+            project_dir, written_map = write_project_output(
                 full_project, docs, config.output_dir, prev_state
             )
             project_synced = True
@@ -2222,7 +2386,12 @@ def sync_project(
             metrics["projects_skipped"] += 1
 
         # Build state for this project (always update state)
-        new_state["projects"][project_uuid] = build_project_state(full_project, docs)
+        prev_docs_state = (
+            prev_state.get("projects", {}).get(project_uuid, {}).get("docs", {})
+        )
+        new_state["projects"][project_uuid] = build_project_state(
+            full_project, docs, written_map, prev_docs_state
+        )
 
         # Clear from failed projects if it was previously failed
         if project_uuid in prev_failed:
@@ -2404,6 +2573,7 @@ def sync(config: Config) -> int:
                     f"  - {info.get('name', uuid[:8])}: {info.get('error', 'unknown error')}"
                 )
 
+        attempted_uuids: set[str] = set()
         pbar = tqdm(projects, desc="Syncing projects", unit="project")
         for project in pbar:
             if _interrupted:
@@ -2412,6 +2582,7 @@ def sync(config: Config) -> int:
 
             project_uuid = project["uuid"]
             project_name = project.get("name", "Unknown")
+            attempted_uuids.add(project_uuid)
 
             # Update progress bar with current project name (truncate if too long)
             display_name = (
@@ -2449,8 +2620,13 @@ def sync(config: Config) -> int:
                     "failed_at": synced_at,
                 }
 
-        # Step 6: Detect deleted projects and mark as orphaned
-        deleted_uuids = detect_deleted_projects(prev_state, projects)
+        # Step 6: Detect deleted projects and mark as orphaned.
+        # With --project, the fetched list is filtered, so absence from it
+        # says nothing about deletion; skip detection entirely.
+        if config.project_filter:
+            deleted_uuids = []
+        else:
+            deleted_uuids = detect_deleted_projects(prev_state, projects)
         orphaned_projects = []
         for deleted_uuid in deleted_uuids:
             prev_project = prev_state.get("projects", {}).get(deleted_uuid, {})
@@ -2468,9 +2644,19 @@ def sync(config: Config) -> int:
                 f"Project '{prev_project.get('name', deleted_uuid)}' deleted remotely (local files kept)"
             )
 
-        # Step 6.5: Sync standalone conversations if requested
-        standalone_conversation_count = 0
-        if config.include_standalone:
+        # Step 6.5: Sync standalone conversations if requested.
+        # None = not synced this run; write_index then preserves the previous
+        # index section instead of clearing it.
+        standalone_conversation_count: int | None = None
+        if config.include_standalone and config.project_filter:
+            # With a filtered project list, every other project's conversations
+            # would be misclassified as standalone; skip rather than corrupt.
+            log.info("Skipping standalone conversations (--project filter active)")
+            if "standalone_conversations" in prev_state:
+                new_state["standalone_conversations"] = prev_state[
+                    "standalone_conversations"
+                ]
+        elif config.include_standalone:
             log.info("Syncing standalone conversations...")
             try:
                 # Get all project UUIDs to filter them out
@@ -2501,6 +2687,18 @@ def sync(config: Config) -> int:
 
                     tb = traceback.format_exc()
                     log.error(sanitize_sensitive_data(tb))
+
+        # Carry forward state for projects not attempted this run (filtered out
+        # via --project or skipped by an interrupt), so they aren't treated as
+        # new/deleted next time. Failed projects are intentionally NOT carried
+        # forward: dropping their state forces a full rewrite on retry.
+        for prev_uuid, prev_proj_state in prev_state.get("projects", {}).items():
+            if (
+                prev_uuid not in attempted_uuids
+                and prev_uuid not in deleted_uuids
+                and prev_uuid not in new_state["projects"]
+            ):
+                new_state["projects"][prev_uuid] = prev_proj_state
 
         # Step 7: Write index and save sync state
         # Add failed projects to state for next sync
@@ -2557,7 +2755,7 @@ def sync(config: Config) -> int:
                 error_short = error if len(error) <= 100 else f"{error[:97]}..."
                 print(f"  - {proj_name}: {error_short}")
             print(
-                "\nFailed projects were excluded from index.json and will be retried on next sync."
+                "\nFailed projects keep their previous index.json entry (local files unchanged) and will be fully re-synced on next run."
             )
             return 1  # Non-zero exit code to indicate partial failure
 
@@ -3587,15 +3785,26 @@ def status(
                 )
                 raise typer.Exit(1)
 
-            # Load org_uuid from index.json
+            # Load org_uuid from index.json (multi-org format; fall back to
+            # the legacy single-org "org_id" key)
             index_path = output / "index.json"
             with open(index_path) as f:
                 index = json.load(f)
             org_uuid = index.get("org_id")
+            if not org_uuid:
+                orgs = index.get("orgs", {})
+                if len(orgs) == 1:
+                    org_uuid = next(iter(orgs))
+                elif len(orgs) > 1:
+                    log.error(
+                        "Multiple orgs in index.json; remote status supports "
+                        f"only one. Orgs: {', '.join(orgs)}"
+                    )
+                    raise typer.Exit(1)
 
             if not org_uuid:
                 log.error(
-                    "No org_id in index.json. Please re-sync to update local state."
+                    "No org found in index.json. Please re-sync to update local state."
                 )
                 raise typer.Exit(1)
 
