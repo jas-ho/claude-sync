@@ -1160,6 +1160,11 @@ _No project instructions defined._
             prev_docs = prev_project.get("docs", {})
 
         used_filenames: set[str] = set()
+        # Paths written this run, lowercased because APFS is case-insensitive;
+        # guards deletion logic below against removing a freshly written file
+        # when a doc was deleted+re-uploaded under the same name (new UUID,
+        # same filename, possibly different case)
+        written_paths_ci: set[str] = set()
         for doc in docs:
             doc_uuid = doc.get("uuid", "")
 
@@ -1196,6 +1201,10 @@ _No project instructions defined._
                         log.warning(
                             f"Skipping suspicious filename in state: {prev_filename}"
                         )
+                    elif str(old_doc_path).lower() in written_paths_ci:
+                        log.debug(
+                            f"Skipping rename cleanup of {prev_filename}: filename reused by a doc written this run"
+                        )
                     elif old_doc_path.exists():
                         log.info(
                             f"Doc renamed: '{prev_filename}' -> '{doc_filename}', removing old file"
@@ -1206,6 +1215,7 @@ _No project instructions defined._
             doc_path = docs_dir / unique_filename
             backup_file(doc_path, backup_dir)
             doc_path.write_text(content, encoding="utf-8")
+            written_paths_ci.add(str(doc_path).lower())
             log.debug(f"Wrote {doc_path}")
 
         # Detect deleted docs
@@ -1223,6 +1233,11 @@ _No project instructions defined._
                     if not validate_path_within_directory(old_doc_path, docs_dir):
                         log.warning(
                             f"Skipping suspicious filename in state: {prev_filename}"
+                        )
+                        continue
+                    if str(old_doc_path).lower() in written_paths_ci:
+                        log.debug(
+                            f"Skipping orphan deletion of {prev_filename}: filename reused by a re-uploaded doc"
                         )
                         continue
                     if old_doc_path.exists():
@@ -2976,8 +2991,9 @@ def load_local_status(output_dir: Path) -> dict:
     from datetime import datetime, timezone as tz
 
     project_list.sort(
-        key=lambda p: parse_timestamp(p["updated_at"])
-        or datetime.min.replace(tzinfo=tz.utc),
+        key=lambda p: (
+            parse_timestamp(p["updated_at"]) or datetime.min.replace(tzinfo=tz.utc)
+        ),
         reverse=True,
     )
 
