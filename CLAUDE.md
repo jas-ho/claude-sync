@@ -1,6 +1,8 @@
 # claude-sync
 
-**Note**: This project uses [bd (beads)](https://github.com/steveyegge/beads) for issue tracking. Use `bd` commands instead of markdown TODOs. See AGENTS.md for workflow details.
+`CLAUDE.md` and `AGENTS.md` are identical agent instructions. Keep them synchronized.
+
+This project uses [bd (beads)](https://github.com/steveyegge/beads) for all issue tracking. Do not create markdown TODO lists or use a second tracker.
 
 ## Project Purpose
 
@@ -22,7 +24,7 @@ Single UV script (`claude_sync.py`) with inline dependencies:
 
 **Output**: Directory structure (not ZIP) for git tracking:
 
-```
+```text
 <output-dir>/
 ├── .sync-state.json        # Internal sync state (timestamps, hashes)
 ├── index.json              # Manifest with sync metadata
@@ -81,7 +83,7 @@ Check sync health without running a full sync:
 
 ## Development Guidelines
 
-- **Bash timeouts**: Use the Bash tool's `timeout` parameter instead of wrapping commands with `timeout`. This avoids permission prompt issues (Claude Code uses prefix matching, so `timeout X cmd` doesn't match `cmd:*` rules).
+- **Command timeouts**: In Claude Code, use the Bash tool's `timeout` parameter instead of wrapping commands with `timeout`; shell wrappers do not match its prefix-based permission rules. In other agent hosts, prefer the execution tool's native timeout when available.
 - Single-file UV script with inline deps for portability
 - Configurable output location (default: `~/.local/share/claude-sync/`)
 - User-agnostic: No hardcoded paths or personal data
@@ -123,7 +125,12 @@ uv run ./claude_sync.py status -o ./test-data
 ## Issue Tracking
 
 ```bash
-bd ready          # See unblocked work
-bd list           # All issues
-bd show <id>      # Issue details
+bd ready --json                              # See unblocked work
+bd list --json                               # List all issues
+bd show <id> --json                          # Show issue details
+bd create "Issue title" -t task -p 2 --json # Create work
+bd update <id> --status in_progress --json   # Claim work
+bd close <id> --reason "Done" --json         # Complete work
 ```
+
+Use `bd` for all task tracking, link discovered work with `discovered-from`, and commit `.beads/issues.jsonl` with the related code changes.

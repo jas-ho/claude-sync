@@ -1,107 +1,136 @@
-# claude-sync Agent Instructions
+# claude-sync
 
-## Project Overview
+`CLAUDE.md` and `AGENTS.md` are identical agent instructions. Keep them synchronized.
 
-**claude-sync** is a CLI tool to sync Claude web app projects to local storage for use with Claude Code. It extracts projects, docs, and conversations from claude.ai and organizes them for local access.
+This project uses [bd (beads)](https://github.com/steveyegge/beads) for all issue tracking. Do not create markdown TODO lists or use a second tracker.
 
-## Issue Tracking with bd (beads)
+## Project Purpose
 
-**IMPORTANT**: This project uses **bd (beads)** for ALL issue tracking. Do NOT use markdown TODOs, task lists, or other tracking methods.
+Sync Claude web app projects (claude.ai) to local storage for use with Claude Code.
 
-### Why bd?
+**Key Use Cases:**
 
-- Dependency-aware: Track blockers and relationships between issues
-- Git-friendly: Auto-syncs to JSONL for version control
-- Agent-optimized: JSON output, ready work detection, discovered-from links
-- Prevents duplicate tracking systems and confusion
+- Access project docs locally (style guides, process docs)
+- Search conversation history
+- Make project instructions available in Claude Code
 
-### Quick Start
+## Architecture
 
-**Check for ready work:**
+Single UV script (`claude_sync.py`) with inline dependencies:
 
-```bash
-bd ready --json
+- `curl_cffi` - API calls (Cloudflare bypass)
+- `browser-cookie3` - Session extraction from Edge/Chrome
+- `tqdm` - Progress display
+
+**Output**: Directory structure (not ZIP) for git tracking:
+
+```text
+<output-dir>/
+├── .sync-state.json        # Internal sync state (timestamps, hashes)
+├── index.json              # Manifest with sync metadata
+├── _standalone/            # Standalone conversations (not in projects)
+│   ├── index.json          # Standalone conversation manifest
+│   └── <conversation-name>.md  # Individual conversations (named by title)
+└── <project-slug>/
+    ├── CLAUDE.md           # Project instructions (from prompt_template)
+    ├── meta.json           # Project metadata
+    ├── docs/               # Project documents
+    └── conversations/      # Project conversation history
+        ├── index.json      # Conversation manifest
+        └── <conversation-name>.md  # Individual conversations (named by title)
 ```
 
-**Create new issues:**
+## Status Command
+
+Check sync health without running a full sync:
 
 ```bash
-bd create "Issue title" -t bug|feature|task -p 0-4 --json
-bd create "Issue title" -p 1 --deps discovered-from:bd-123 --json
-bd create "Subtask" --parent <epic-id> --json  # Hierarchical subtask (gets ID like epic-id.1)
+# Local status (no auth required)
+./claude_sync.py status
+
+# Check for remote changes
+./claude_sync.py status --remote
+
+# Thorough doc checking (slow)
+./claude_sync.py status --remote --check-docs
 ```
 
-**Claim and update:**
+**Local status shows:**
+
+- Last sync time and age
+- Project, document, conversation counts
+- Recently active projects
+- Integrity check (directories match manifest)
+
+**Remote comparison (`--remote`) detects:**
+
+- New projects on claude.ai
+- Modified project instructions
+- New/modified conversations
+- Deleted projects
+
+**Document checking (`--check-docs`):**
+
+- Detects new, modified, or deleted documents
+- Requires `--remote` flag
+- May be slow as it fetches all document metadata
+
+## Technical Constraints
+
+- **Read-only API**: No write endpoints for claude.ai projects exist
+- **Auth**: Browser cookie extraction (sessionKey, cf_clearance)
+- **Incremental sync**: Use `updated_at` timestamps + content hashing for docs
+
+## Development Guidelines
+
+- **Command timeouts**: In Claude Code, use the Bash tool's `timeout` parameter instead of wrapping commands with `timeout`; shell wrappers do not match its prefix-based permission rules. In other agent hosts, prefer the execution tool's native timeout when available.
+- Single-file UV script with inline deps for portability
+- Configurable output location (default: `~/.local/share/claude-sync/`)
+- User-agnostic: No hardcoded paths or personal data
+- Robust filename sanitization (cross-platform)
+
+## Testing Approach
+
+**Use local `test-data/` directory** instead of `~/.local/share/claude-sync/` to avoid permission prompts:
 
 ```bash
-bd update bd-42 --status in_progress --json
-bd update bd-42 --priority 1 --json
+# Create test directory (gitignored)
+mkdir -p ./test-data
+
+# Copy real sync data for testing (one-time setup)
+cp ~/.local/share/claude-sync/index.json ./test-data/
+cp ~/.local/share/claude-sync/.sync-state.json ./test-data/
+
+# Test with local directory
+uv run ./claude_sync.py status -o ./test-data
+
+# For remote tests, you can still use -o ./test-data for output
+# but remote API calls will work normally
 ```
 
-**Complete work:**
+**Why this matters:**
+
+- Avoids repeated permission prompts for `~/.local/share/` operations
+- `test-data/` is in `.gitignore` so test artifacts aren't committed
+- Sub-agents can run tests without needing user approval
+
+## Key Files
+
+- `claude_sync.py` - Main script (single-file UV script with inline dependencies)
+- `docs/RESEARCH.md` - Full API research and planning
+- `docs/API_CONTRACT.md` - API response structure assumptions
+- `docs/IMPLEMENTATION_NOTES.md` - Implementation findings and edge cases
+- `reference/` - Old scripts and gist reference
+
+## Issue Tracking
 
 ```bash
-bd close bd-42 --reason "Completed" --json
+bd ready --json                              # See unblocked work
+bd list --json                               # List all issues
+bd show <id> --json                          # Show issue details
+bd create "Issue title" -t task -p 2 --json # Create work
+bd update <id> --status in_progress --json   # Claim work
+bd close <id> --reason "Done" --json         # Complete work
 ```
 
-### Issue Types
-
-- `bug` - Something broken
-- `feature` - New functionality
-- `task` - Work item (tests, docs, refactoring)
-- `epic` - Large feature with subtasks
-- `chore` - Maintenance (dependencies, tooling)
-
-### Priorities
-
-- `0` - Critical (security, data loss, broken builds)
-- `1` - High (major features, important bugs)
-- `2` - Medium (default, nice-to-have)
-- `3` - Low (polish, optimization)
-- `4` - Backlog (future ideas)
-
-### Workflow for AI Agents
-
-1. **Check ready work**: `bd ready` shows unblocked issues
-1. **Claim your task**: `bd update <id> --status in_progress`
-1. **Work on it**: Implement, test, document
-1. **Discover new work?** Create linked issue:
-   - `bd create "Found bug" -p 1 --deps discovered-from:<parent-id>`
-1. **Complete**: `bd close <id> --reason "Done"`
-1. **Commit together**: Always commit the `.beads/issues.jsonl` file together with the code changes so issue state stays in sync with code state
-
-### Auto-Sync
-
-bd automatically syncs with git:
-
-- Exports to `.beads/issues.jsonl` after changes (5s debounce)
-- Imports from JSONL when newer (e.g., after `git pull`)
-- No manual export/import needed!
-
-### Managing AI-Generated Planning Documents
-
-AI assistants often create planning and design documents during development:
-
-- PLAN.md, IMPLEMENTATION.md, ARCHITECTURE.md
-- DESIGN.md, CODEBASE_SUMMARY.md, INTEGRATION_PLAN.md
-
-**Best Practice: Use a dedicated directory for these ephemeral files**
-
-- Create a `history/` directory in the project root
-- Store ALL AI-generated planning/design docs in `history/`
-- Keep the repository root clean and focused on permanent project files
-
-### CLI Help
-
-Run `bd <command> --help` to see all available flags for any command.
-
-### Important Rules
-
-- Use bd for ALL task tracking
-- Always use `--json` flag for programmatic use
-- Link discovered work with `discovered-from` dependencies
-- Check `bd ready` before asking "what should I work on?"
-- Store AI planning docs in `history/` directory
-- Run `bd <cmd> --help` to discover available flags
-- Do NOT create markdown TODO lists
-- Do NOT duplicate tracking systems
+Use `bd` for all task tracking, link discovered work with `discovered-from`, and commit `.beads/issues.jsonl` with the related code changes.
