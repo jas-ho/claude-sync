@@ -13,6 +13,13 @@ Sync Claude.ai web app projects to local filesystem for use with Claude Code.
 
 Built as a single-file UV script with inline dependencies - no installation required.
 
+## How it works (and why it may break)
+
+- Reads your claude.ai session cookie from your local Edge or Chrome profile; nothing is stored.
+- Calls the same internal JSON endpoints the claude.ai web app uses (organizations, projects, documents, conversations). These are **not a public or documented API**: Anthropic can change them at any time, and a change can break sync without warning. Observed response shapes are recorded in [docs/API_CONTRACT.md](docs/API_CONTRACT.md).
+- Writes each project as plain files (instructions, documents, conversations as Markdown), keeps a state file for incremental runs, and commits every sync to a local git repo so an overwrite can be undone.
+- Read-only toward claude.ai. Not affiliated with or endorsed by Anthropic.
+
 ## Quick Start
 
 ```bash
