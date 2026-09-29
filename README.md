@@ -2,6 +2,10 @@
 
 Sync Claude.ai web app projects to local filesystem for use with Claude Code.
 
+![claude.ai projects on the left are synced by claude_sync.py into a local folder per project, each with CLAUDE.md, docs/ and conversations/ as Markdown files; a rendered conversation file is shown below the tree](docs/img/overview.png)
+
+*Each claude.ai project becomes a local folder of Markdown files (example data is fictional).*
+
 ## Overview
 
 **claude-sync** downloads your Claude.ai projects, documents, and conversation history to a local directory structure. This enables:
